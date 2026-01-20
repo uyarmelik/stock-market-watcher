@@ -43,7 +43,6 @@ tickers = [
     "ENKAI.IS",
     "EREGL.IS",
     "EUPWR.IS",
-    "FENER.IS",
     "FROTO.IS",
     "GARAN.IS",
     "GENIL.IS",
@@ -51,7 +50,6 @@ tickers = [
     "GLRMK.IS",
     "GRSEL.IS",
     "GRTHO.IS",
-    "GSRAY.IS",
     "GUBRF.IS",
     "HALKB.IS",
     "HEKTS.IS",
@@ -105,7 +103,6 @@ tickers = [
     "TURSG.IS",
     "ULKER.IS",
     "VAKBN.IS",
-    "VESTL.IS",
     "YEOTK.IS",
     "YKBNK.IS",
     "ZOREN.IS"
