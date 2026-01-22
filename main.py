@@ -146,9 +146,10 @@ def send_email(subject, alert_message):
 
 
 def check_stocks():
-    alerts = []
+    avg_alerts = []
+    max_alerts = []
     current_states = load_state()
-    new_states = current_states.copy()
+    new_states = {}
 
     print("Checking stocks...")
 
@@ -162,12 +163,23 @@ def check_stocks():
 
             current_price = hist["Close"].iloc[-1]
             yearly_avg = hist["Close"].mean()
-            threshold = yearly_avg * 0.80
+            yearly_max = hist["Close"].max()
+            avg_threshold = yearly_avg * 0.80
+            max_threshold = yearly_max * 0.70
 
-            is_below_threshold = current_price < threshold
-            was_below_threshold = current_states.get(symbol, False)
+            prev_state = current_states.get(symbol, {})
+            if isinstance(prev_state, bool):
+                prev_state = {"avg_below": prev_state, "max_below": False}
 
-            if is_below_threshold and not was_below_threshold:
+            was_below_avg = prev_state.get("avg_below", False)
+            was_below_max = prev_state.get("max_below", False)
+
+            is_below_avg = current_price < avg_threshold
+            is_below_max = current_price < max_threshold
+
+            new_states[symbol] = {"avg_below": is_below_avg, "max_below": is_below_max}
+
+            if is_below_avg and not was_below_avg:
                 diff = ((yearly_avg - current_price) / yearly_avg) * 100
                 info = (
                     f"🔻 DROP ALERT: {symbol}\n"
@@ -176,10 +188,9 @@ def check_stocks():
                     f"   Status: {diff:.2f}% below average!\n"
                     f"--------------------------------"
                 )
-                alerts.append(info)
-                new_states[symbol] = True
+                avg_alerts.append(info)
 
-            elif not is_below_threshold and was_below_threshold:
+            elif not is_below_avg and was_below_avg:
                 info = (
                     f"✅ RECOVERY ALERT: {symbol}\n"
                     f"   Price: {current_price:.2f} TL\n"
@@ -187,18 +198,44 @@ def check_stocks():
                     f"   Status: Climbed back above the 20% threshold.\n"
                     f"--------------------------------"
                 )
-                alerts.append(info)
-                new_states[symbol] = False
+                avg_alerts.append(info)
+
+            if is_below_max and not was_below_max:
+                diff = ((yearly_max - current_price) / yearly_max) * 100
+                info = (
+                    f"📉 DROP ALERT: {symbol}\n"
+                    f"   Price: {current_price:.2f} TL\n"
+                    f"   Yearly Max: {yearly_max:.2f} TL\n"
+                    f"   Status: {diff:.2f}% below yearly maximum!\n"
+                    f"--------------------------------"
+                )
+                max_alerts.append(info)
+
+            elif not is_below_max and was_below_max:
+                info = (
+                    f"🚀 RECOVERY ALERT: {symbol}\n"
+                    f"   Price: {current_price:.2f} TL\n"
+                    f"   Yearly Max: {yearly_max:.2f} TL\n"
+                    f"   Status: Climbed back above the 30% max threshold.\n"
+                    f"--------------------------------"
+                )
+                max_alerts.append(info)
 
         except Exception as e:
             print(f"Error checking {symbol}: {e}")
             continue
 
-    if alerts:
-        full_text = "Stock status changes detected:\n\n" + "\n".join(alerts)
-        send_email("🚨 BIST Status Change Alert", full_text)
+    if avg_alerts:
+        full_text = "Stock status changes (Average-based):\n\n" + "\n".join(avg_alerts)
+        send_email("🚨 BIST Average Alert", full_text)
     else:
-        print("No status changes found.")
+        print("No average-based status changes found.")
+
+    if max_alerts:
+        full_text = "Stock status changes (Max-based):\n\n" + "\n".join(max_alerts)
+        send_email("📉 BIST Max Drop Alert", full_text)
+    else:
+        print("No max-based status changes found.")
 
     save_state(new_states)
 
