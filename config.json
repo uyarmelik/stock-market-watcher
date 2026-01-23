@@ -99,17 +99,25 @@
         "ZOREN.IS"
     ],
     "target_prices": {
-        "THYAO.IS": {
-            "low": 280.00,
-            "high": 320.00
+        "KONTR.IS": {
+            "low": 9.10,
+            "high": 10.26
         },
-        "GARAN.IS": {
-            "low": 60.00,
-            "high": 90.00
+        "SASA.IS": {
+            "low": 2.26,
+            "high": 2.54
         },
-        "EREGL.IS": {
-            "low": 40.00,
-            "high": 60.00
+        "KCAER.IS": {
+            "low": 10.48,
+            "high": 11.82
+        },
+        "ALTNY.IS": {
+            "low": 15.75,
+            "high": 17.75
+        }, 
+        "PATEK.IS": {
+            "low": 19.53,
+            "high": 22.03
         }
     }
 }
