@@ -74,6 +74,16 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 
+def fill_missing_tickers(
+    recs: List[Dict[str, Any]], snapshots: List[StockSnapshot]
+) -> None:
+    n = min(len(recs), len(snapshots))
+    for i in range(n):
+        r = recs[i]
+        if not (r.get("ticker") or str(r.get("ticker", "")).strip()):
+            r["ticker"] = snapshots[i].ticker
+
+
 def normalize_action(action: str) -> str:
     a = (action or "").strip().upper()
     if a in ("BUY", "SELL", "HOLD"):
@@ -528,20 +538,7 @@ def format_daily_email(
     position_recs: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[str, str]:
     today = datetime.now().strftime("%d-%m-%Y")
-
-    counts = {"BUY": 0, "SELL": 0, "HOLD": 0}
-    for r in recs:
-        a = normalize_action(str(r.get("action", "HOLD")))
-        if a in counts:
-            counts[a] += 1
-
-    lines = [
-        f"BIST Daily BUY/SELL/HOLD - {today}",
-        f"Summary: BUY={counts['BUY']} | SELL={counts['SELL']} | HOLD={counts['HOLD']}",
-        "",
-        "Format: TICKER: ACTION — reason (<=20 words)",
-        "",
-    ]
+    lines: List[str] = []
 
     for r in recs:
         t = r.get("ticker", "")
@@ -554,7 +551,7 @@ def format_daily_email(
 
     if position_recs:
         lines.append("")
-        lines.append("--- My positions (based on purchase_price) ---")
+        lines.append("--- My positions ---")
         lines.append("")
         for r in position_recs:
             t = r.get("ticker", "")
@@ -640,6 +637,7 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
 
     research_summary = fetch_research_summary(tickers)
     final = openai_review_json(snapshots, gemini, research_summary=research_summary) or gemini
+    fill_missing_tickers(final, snapshots)
     for r in final:
         r["action"] = normalize_action(str(r.get("action", "HOLD")))
 
@@ -666,6 +664,7 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
                 }
                 for s in position_snapshots
             ]
+        fill_missing_tickers(position_final, position_snapshots)
         for r in position_final:
             r["action"] = normalize_action(str(r.get("action", "HOLD")))
 
