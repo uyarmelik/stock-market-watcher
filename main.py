@@ -5,6 +5,7 @@ import smtplib
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv
 
 try:
     import yfinance as yf
@@ -14,6 +15,7 @@ except ImportError as e:
     print(f"Library missing: {e}")
     sys.exit(1)
 
+load_dotenv()
 ENV = os.environ
 KEY_GEMINI = ENV.get("GEMINI_API_KEY")
 KEY_OPENAI = ENV.get("OPENAI_API_KEY")
@@ -50,7 +52,7 @@ def ask_gemini(prompt):
     try:
         genai.configure(api_key=KEY_GEMINI)
 
-        model_name = "gemini-1.5-flash"
+        model_name = "gemini-1.5-flash-latest"
         try:
             model = genai.GenerativeModel(model_name)
         except:
