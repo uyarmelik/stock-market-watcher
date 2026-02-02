@@ -157,6 +157,22 @@ def format_snapshot_line(s: StockSnapshot) -> str:
     return " | ".join(parts)
 
 
+def format_position_line(s: StockSnapshot) -> str:
+    pp = s.purchase_price or 0
+    chg = ((s.price - pp) / pp * 100) if pp else 0
+    parts = [
+        f"{s.ticker}",
+        f"bought_at={pp:.2f}",
+        f"current={s.price:.2f}",
+        f"chg_vs_buy={chg:+.1f}%",
+        f"RSI={'' if s.rsi14 is None else f'{s.rsi14:.1f}'}",
+        f"SMA20={'' if s.sma20 is None else f'{s.sma20:.2f}'}",
+        f"low={'' if s.target_low is None else f'{s.target_low:.2f}'}",
+        f"high={'' if s.target_high is None else f'{s.target_high:.2f}'}",
+    ]
+    return " | ".join(parts)
+
+
 def fetch_bist_tickers_from_borsaistanbul() -> List[str]:
     try:
         raw = urllib.request.urlopen(BIST_EQUITY_CSV_URL, timeout=30).read()
@@ -290,7 +306,7 @@ def gemini_json_recommendations(lines: List[str]) -> Optional[List[Dict[str, Any
         "Rules:\n"
         "- Return only JSON (no other text).\n"
         "- action must be one of: AL, SAT, TUT\n"
-        "- reason in Turkish, at most 20 words.\n"
+        "- reason in English, at most 20 words.\n"
         "- If unsure, choose TUT.\n"
         "- BASE field (heuristic) is reference only; do not copy blindly.\n\n"
         "Produce a JSON array in this format:\n"
@@ -309,6 +325,30 @@ def gemini_json_recommendations(lines: List[str]) -> Optional[List[Dict[str, Any
         return json.loads(block)
     except Exception as e:
         print(f"Gemini error: {e}")
+        return None
+
+
+def gemini_position_recommendations(
+    lines: List[str],
+) -> Optional[List[Dict[str, Any]]]:
+    if not KEY_GEMINI:
+        return None
+    prompt = (
+        "You are an assistant for BIST positions. For each line the user BOUGHT at bought_at; current price is current.\n"
+        "Rules: Return only JSON. action = AL (add), SAT (sell), or TUT (hold). reason in English, at most 20 words.\n"
+        "Consider: gain/loss vs purchase, RSI, target low/high. If unsure, choose TUT.\n\n"
+        'Produce a JSON array: [{"ticker":"XXX.IS","action":"AL|SAT|TUT","reason":"..."}, ...]\n\n'
+        "Position lines:\n" + "\n".join(lines)
+    )
+    try:
+        client = genai.Client(api_key=KEY_GEMINI)
+        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        text = getattr(resp, "text", "")
+        block = extract_json_block(text)
+        if not block:
+            return None
+        return json.loads(block)
+    except Exception:
         return None
 
 
@@ -352,7 +392,7 @@ def openai_review_json(
             messages=[
                 {
                     "role": "system",
-                    "content": "Output only JSON. action=AL|SAT|TUT; reason <= 20 words, in Turkish.",
+                    "content": "Output only JSON. action=AL|SAT|TUT; reason <= 20 words, in English.",
                 },
                 {"role": "user", "content": msg},
             ],
@@ -366,6 +406,51 @@ def openai_review_json(
         return json.loads(block)
     except Exception as e:
         print(f"OpenAI error: {e}")
+        return None
+
+
+def openai_review_position_json(
+    snapshots: List[StockSnapshot],
+    gemini_json: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    if not KEY_OPENAI:
+        return None
+    compact_data = [
+        {
+            "ticker": s.ticker,
+            "bought_at": s.purchase_price,
+            "current": s.price,
+            "rsi": s.rsi14,
+            "low": s.target_low,
+            "high": s.target_high,
+        }
+        for s in snapshots
+    ]
+    msg = (
+        "Review position data and Gemini output. Task: For each ticker (user bought at bought_at, current price current), "
+        "fix AL/SAT/TUT if logic error; reason in English, max 20 words. Output only JSON.\n\n"
+        f"DATA={json.dumps(compact_data, ensure_ascii=False)}\n\n"
+        f"GEMINI={json.dumps(gemini_json, ensure_ascii=False)}"
+    )
+    try:
+        client = OpenAI(api_key=KEY_OPENAI)
+        res = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Output only JSON. action=AL|SAT|TUT; reason <= 20 words, in English.",
+                },
+                {"role": "user", "content": msg},
+            ],
+            temperature=0.2,
+        )
+        text = res.choices[0].message.content or ""
+        block = extract_json_block(text)
+        if not block:
+            return None
+        return json.loads(block)
+    except Exception:
         return None
 
 
@@ -389,7 +474,10 @@ def send_email(subject: str, body: str) -> None:
         print(f"Mail error: {e}")
 
 
-def format_daily_email(recs: List[Dict[str, Any]]) -> Tuple[str, str]:
+def format_daily_email(
+    recs: List[Dict[str, Any]],
+    position_recs: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[str, str]:
     today = datetime.now().strftime("%d-%m-%Y")
 
     counts = {"AL": 0, "SAT": 0, "TUT": 0}
@@ -414,6 +502,19 @@ def format_daily_email(recs: List[Dict[str, Any]]) -> Tuple[str, str]:
         if len(reason_words) > 20:
             reason = " ".join(reason_words[:20])
         lines.append(f"{t}: {a} — {reason}")
+
+    if position_recs:
+        lines.append("")
+        lines.append("--- My positions (based on purchase_price) ---")
+        lines.append("")
+        for r in position_recs:
+            t = r.get("ticker", "")
+            a = str(r.get("action", "TUT")).upper()
+            reason = str(r.get("reason", "")).strip()
+            reason_words = reason.split()
+            if len(reason_words) > 20:
+                reason = " ".join(reason_words[:20])
+            lines.append(f"{t}: {a} — {reason}")
 
     lines.append("")
     lines.append(
@@ -490,6 +591,26 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
 
     final = openai_review_json(snapshots, gemini) or gemini
 
+    position_snapshots = [s for s in snapshots if s.purchase_price is not None]
+    position_final: Optional[List[Dict[str, Any]]] = None
+    if position_snapshots:
+        position_lines = [format_position_line(s) for s in position_snapshots]
+        position_gemini = gemini_position_recommendations(position_lines)
+        if position_gemini:
+            position_final = (
+                openai_review_position_json(position_snapshots, position_gemini)
+                or position_gemini
+            )
+        else:
+            position_final = [
+                {
+                    "ticker": s.ticker,
+                    "action": s.baseline,
+                    "reason": "Technical view vs purchase price.",
+                }
+                for s in position_snapshots
+            ]
+
     write_json(
         "daily_recommendations.json",
         {
@@ -497,10 +618,11 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
             "gemini_model": GEMINI_MODEL,
             "openai_model": OPENAI_MODEL,
             "recommendations": final,
+            "position_recommendations": position_final,
         },
     )
 
-    subject, body = format_daily_email(final)
+    subject, body = format_daily_email(final, position_recs=position_final)
     send_email(subject, body)
 
 
