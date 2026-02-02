@@ -16,6 +16,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from openai import OpenAI
 from google import genai
+from google.genai import types as genai_types
 
 load_dotenv()
 
@@ -73,6 +74,19 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 
+def normalize_action(action: str) -> str:
+    a = (action or "").strip().upper()
+    if a in ("BUY", "SELL", "HOLD"):
+        return a
+    if a == "AL":
+        return "BUY"
+    if a == "SAT":
+        return "SELL"
+    if a == "TUT":
+        return "HOLD"
+    return "HOLD"
+
+
 def extract_json_block(text: str) -> Optional[str]:
     if not text:
         return None
@@ -117,22 +131,15 @@ def baseline_action(
     sma20: Optional[float],
     sma50: Optional[float],
     rsi14: Optional[float],
-    target_low: Optional[float],
-    target_high: Optional[float],
 ) -> str:
-    if target_low is not None and price <= target_low:
-        return "AL"
-    if target_high is not None and price >= target_high:
-        return "SAT"
-
     if sma20 is None or sma50 is None or rsi14 is None:
-        return "TUT"
+        return "HOLD"
 
     if price > sma20 > sma50 and 55 <= rsi14 <= 70:
-        return "AL"
+        return "BUY"
     if price < sma20 < sma50 and rsi14 <= 45:
-        return "SAT"
-    return "TUT"
+        return "SELL"
+    return "HOLD"
 
 
 def format_snapshot_line(s: StockSnapshot) -> str:
@@ -149,10 +156,6 @@ def format_snapshot_line(s: StockSnapshot) -> str:
 
     if s.purchase_price is not None:
         parts.append(f"MAL={s.purchase_price:.2f}")
-    if s.target_low is not None:
-        parts.append(f"LOW={s.target_low:.2f}")
-    if s.target_high is not None:
-        parts.append(f"HIGH={s.target_high:.2f}")
 
     return " | ".join(parts)
 
@@ -167,8 +170,6 @@ def format_position_line(s: StockSnapshot) -> str:
         f"chg_vs_buy={chg:+.1f}%",
         f"RSI={'' if s.rsi14 is None else f'{s.rsi14:.1f}'}",
         f"SMA20={'' if s.sma20 is None else f'{s.sma20:.2f}'}",
-        f"low={'' if s.target_low is None else f'{s.target_low:.2f}'}",
-        f"high={'' if s.target_high is None else f'{s.target_high:.2f}'}",
     ]
     return " | ".join(parts)
 
@@ -273,7 +274,7 @@ def build_snapshots(
         low = safe_float(tp.get("low"))
         high = safe_float(tp.get("high"))
 
-        base = baseline_action(price, sma20, sma50, rsi14, low, high)
+        base = baseline_action(price, sma20, sma50, rsi14)
 
         snapshots.append(
             StockSnapshot(
@@ -302,21 +303,27 @@ def gemini_json_recommendations(lines: List[str]) -> Optional[List[Dict[str, Any
         return None
 
     prompt = (
-        "You are a short daily recommendation assistant for BIST equities.\n"
+        "You are a short daily recommendation assistant for BIST (Istanbul Stock Exchange) equities.\n"
+        "Use both: (1) the technical data lines below (price, RSI, SMA20, SMA50, 5d/21d returns), and (2) your own search for recent news, earnings, or market context on these tickers or BIST.\n"
         "Rules:\n"
         "- Return only JSON (no other text).\n"
-        "- action must be one of: AL, SAT, TUT\n"
+        "- action must be exactly one of: BUY, SELL, HOLD\n"
         "- reason in English, at most 20 words.\n"
-        "- If unsure, choose TUT.\n"
+        "- If unsure, choose HOLD.\n"
         "- BASE field (heuristic) is reference only; do not copy blindly.\n\n"
         "Produce a JSON array in this format:\n"
-        '[{"ticker":"XXX.IS","action":"AL|SAT|TUT","reason":"..."}, ...]\n\n'
+        '[{"ticker":"XXX.IS","action":"BUY|SELL|HOLD","reason":"..."}, ...]\n\n'
         "Data lines:\n" + "\n".join(lines)
     )
 
     try:
         client = genai.Client(api_key=KEY_GEMINI)
-        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        config = genai_types.GenerateContentConfig(
+            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt, config=config
+        )
         text = getattr(resp, "text", "")
         block = extract_json_block(text)
         if not block:
@@ -334,15 +341,21 @@ def gemini_position_recommendations(
     if not KEY_GEMINI:
         return None
     prompt = (
-        "You are an assistant for BIST positions. For each line the user BOUGHT at bought_at; current price is current.\n"
-        "Rules: Return only JSON. action = AL (add), SAT (sell), or TUT (hold). reason in English, at most 20 words.\n"
-        "Consider: gain/loss vs purchase, RSI, target low/high. If unsure, choose TUT.\n\n"
-        'Produce a JSON array: [{"ticker":"XXX.IS","action":"AL|SAT|TUT","reason":"..."}, ...]\n\n'
+        "You are an assistant for BIST (Istanbul Stock Exchange) positions. For each line the user BOUGHT at bought_at; current price is current.\n"
+        "Use both: (1) the position data below (bought_at, current, chg_vs_buy, RSI, SMA20), and (2) your own search for recent news or context on these tickers.\n"
+        "Rules: Return only JSON. action = BUY, SELL, or HOLD. reason in English, at most 20 words.\n"
+        "Consider: gain/loss vs purchase, RSI, SMAs. If unsure, choose HOLD.\n\n"
+        'Produce a JSON array: [{"ticker":"XXX.IS","action":"BUY|SELL|HOLD","reason":"..."}, ...]\n\n'
         "Position lines:\n" + "\n".join(lines)
     )
     try:
         client = genai.Client(api_key=KEY_GEMINI)
-        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        config = genai_types.GenerateContentConfig(
+            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt, config=config
+        )
         text = getattr(resp, "text", "")
         block = extract_json_block(text)
         if not block:
@@ -352,9 +365,34 @@ def gemini_position_recommendations(
         return None
 
 
+def fetch_research_summary(tickers: List[str]) -> Optional[str]:
+    if not KEY_GEMINI or not tickers:
+        return None
+    sample = tickers[:20] if len(tickers) > 20 else tickers
+    ticker_list = ", ".join(sample)
+    prompt = (
+        "Using web search, summarize in one short paragraph (under 150 words) any recent news, earnings, or market sentiment for BIST (Istanbul Stock Exchange) and these tickers: "
+        + ticker_list
+        + ". Be concise. English only."
+    )
+    try:
+        client = genai.Client(api_key=KEY_GEMINI)
+        config = genai_types.GenerateContentConfig(
+            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt, config=config
+        )
+        text = getattr(resp, "text", "").strip()
+        return text if text else None
+    except Exception:
+        return None
+
+
 def openai_review_json(
     snapshots: List[StockSnapshot],
     gemini_json: List[Dict[str, Any]],
+    research_summary: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     if not KEY_OPENAI:
         print("OPENAI_API_KEY is missing.")
@@ -371,18 +409,25 @@ def openai_review_json(
             "r21": s.ret_21d_pct,
             "baseline": s.baseline,
             "purchase": s.purchase_price,
-            "low": s.target_low,
-            "high": s.target_high,
         }
         for s in snapshots
     ]
 
+    research_block = ""
+    if research_summary:
+        research_block = (
+            "\n\nRESEARCH (use this together with data and Gemini to form your view):\n"
+            + research_summary
+            + "\n\n"
+        )
+
     msg = (
-        "Review the data and Gemini output below.\n"
-        "Task: For each ticker, fix AL/SAT/TUT if there is a logic error and keep reason under 20 words.\n"
-        "Return only JSON, no other text.\n\n"
+        "You and Gemini both have access to research. Below: technical DATA, Gemini's recommendations (GEMINI), and optional RESEARCH.\n"
+        "Task: Consider DATA, Gemini's view, and RESEARCH. For each ticker, decide the final BUY/SELL/HOLD (you may agree or disagree with Gemini). Keep reason under 20 words, in English.\n"
+        "Return only a JSON array, no other text. action must be exactly BUY, SELL, or HOLD.\n\n"
         f"DATA={json.dumps(compact_data, ensure_ascii=False)}\n\n"
         f"GEMINI={json.dumps(gemini_json, ensure_ascii=False)}"
+        + research_block
     )
 
     try:
@@ -392,7 +437,7 @@ def openai_review_json(
             messages=[
                 {
                     "role": "system",
-                    "content": "Output only JSON. action=AL|SAT|TUT; reason <= 20 words, in English.",
+                    "content": "Output only JSON. action=BUY|SELL|HOLD; reason <= 20 words, in English.",
                 },
                 {"role": "user", "content": msg},
             ],
@@ -412,6 +457,7 @@ def openai_review_json(
 def openai_review_position_json(
     snapshots: List[StockSnapshot],
     gemini_json: List[Dict[str, Any]],
+    research_summary: Optional[str] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     if not KEY_OPENAI:
         return None
@@ -421,16 +467,19 @@ def openai_review_position_json(
             "bought_at": s.purchase_price,
             "current": s.price,
             "rsi": s.rsi14,
-            "low": s.target_low,
-            "high": s.target_high,
         }
         for s in snapshots
     ]
+    research_block = ""
+    if research_summary:
+        research_block = (
+            "\n\nRESEARCH (use with data and Gemini):\n" + research_summary + "\n\n"
+        )
     msg = (
-        "Review position data and Gemini output. Task: For each ticker (user bought at bought_at, current price current), "
-        "fix AL/SAT/TUT if logic error; reason in English, max 20 words. Output only JSON.\n\n"
+        "Consider position data, Gemini's view, and RESEARCH below. For each ticker (user bought at bought_at, current price current), decide final BUY/SELL/HOLD. reason in English, max 20 words. Output only JSON.\n\n"
         f"DATA={json.dumps(compact_data, ensure_ascii=False)}\n\n"
         f"GEMINI={json.dumps(gemini_json, ensure_ascii=False)}"
+        + research_block
     )
     try:
         client = OpenAI(api_key=KEY_OPENAI)
@@ -439,7 +488,7 @@ def openai_review_position_json(
             messages=[
                 {
                     "role": "system",
-                    "content": "Output only JSON. action=AL|SAT|TUT; reason <= 20 words, in English.",
+                    "content": "Output only JSON. action=BUY|SELL|HOLD; reason <= 20 words, in English.",
                 },
                 {"role": "user", "content": msg},
             ],
@@ -480,15 +529,15 @@ def format_daily_email(
 ) -> Tuple[str, str]:
     today = datetime.now().strftime("%d-%m-%Y")
 
-    counts = {"AL": 0, "SAT": 0, "TUT": 0}
+    counts = {"BUY": 0, "SELL": 0, "HOLD": 0}
     for r in recs:
-        a = str(r.get("action", "TUT")).upper()
+        a = normalize_action(str(r.get("action", "HOLD")))
         if a in counts:
             counts[a] += 1
 
     lines = [
         f"BIST Daily BUY/SELL/HOLD - {today}",
-        f"Summary: AL={counts['AL']} | SAT={counts['SAT']} | TUT={counts['TUT']}",
+        f"Summary: BUY={counts['BUY']} | SELL={counts['SELL']} | HOLD={counts['HOLD']}",
         "",
         "Format: TICKER: ACTION — reason (<=20 words)",
         "",
@@ -496,7 +545,7 @@ def format_daily_email(
 
     for r in recs:
         t = r.get("ticker", "")
-        a = str(r.get("action", "TUT")).upper()
+        a = normalize_action(str(r.get("action", "HOLD")))
         reason = str(r.get("reason", "")).strip()
         reason_words = reason.split()
         if len(reason_words) > 20:
@@ -509,7 +558,7 @@ def format_daily_email(
         lines.append("")
         for r in position_recs:
             t = r.get("ticker", "")
-            a = str(r.get("action", "TUT")).upper()
+            a = normalize_action(str(r.get("action", "HOLD")))
             reason = str(r.get("reason", "")).strip()
             reason_words = reason.split()
             if len(reason_words) > 20:
@@ -521,7 +570,7 @@ def format_daily_email(
         "Note: This output is not investment advice; for informational purposes only."
     )
 
-    subject = f"BIST Daily Recommendation (AL/SAT/TUT) - {today}"
+    subject = f"BIST Daily Recommendation (BUY/SELL/HOLD) - {today}"
     return subject, "\n".join(lines)
 
 
@@ -589,16 +638,23 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
             for s in snapshots
         ]
 
-    final = openai_review_json(snapshots, gemini) or gemini
+    research_summary = fetch_research_summary(tickers)
+    final = openai_review_json(snapshots, gemini, research_summary=research_summary) or gemini
+    for r in final:
+        r["action"] = normalize_action(str(r.get("action", "HOLD")))
 
     position_snapshots = [s for s in snapshots if s.purchase_price is not None]
     position_final: Optional[List[Dict[str, Any]]] = None
     if position_snapshots:
+        position_tickers = [s.ticker for s in position_snapshots]
+        position_research = fetch_research_summary(position_tickers) or research_summary
         position_lines = [format_position_line(s) for s in position_snapshots]
         position_gemini = gemini_position_recommendations(position_lines)
         if position_gemini:
             position_final = (
-                openai_review_position_json(position_snapshots, position_gemini)
+                openai_review_position_json(
+                    position_snapshots, position_gemini, research_summary=position_research
+                )
                 or position_gemini
             )
         else:
@@ -610,6 +666,8 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
                 }
                 for s in position_snapshots
             ]
+        for r in position_final:
+            r["action"] = normalize_action(str(r.get("action", "HOLD")))
 
     write_json(
         "daily_recommendations.json",
@@ -628,7 +686,7 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="BIST tracker + daily AL/SAT/TUT recommender"
+        description="BIST tracker + daily BUY/SELL/HOLD recommender"
     )
     p.add_argument(
         "mode",
