@@ -52,6 +52,57 @@ def ask_gemini(prompt):
     try:
         genai.configure(api_key=KEY_GEMINI)
 
+        candidate_models = [
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-1.5-mini",
+            "gemini-1.5",
+            "gemini-pro",
+            "gemini-mini",
+        ]
+
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+
+        last_err = None
+        for model_name in candidate_models:
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(
+                    prompt, safety_settings=safety_settings
+                )
+                if getattr(response, "parts", None):
+                    return response.text
+                elif getattr(response, "prompt_feedback", None):
+                    return (
+                        f"Gemini Did Not Respond (Blocked): {response.prompt_feedback}"
+                    )
+                else:
+                    return "Gemini returned empty response."
+            except Exception as e:
+                last_err = e
+                continue
+
+        try:
+            if hasattr(genai, "list_models"):
+                available = genai.list_models()
+                return f"Gemini Error: {last_err}. Available models: {available}"
+        except Exception:
+            pass
+
+        return f"Gemini Error: {last_err}"
+
+    except Exception as e:
+        return f"Gemini Error: {str(e)}"
+    if not (genai and KEY_GEMINI):
+        return "Gemini API Key missing."
+    try:
+        genai.configure(api_key=KEY_GEMINI)
+
         model_name = "gemini-1.5-flash"
         try:
             model = genai.GenerativeModel(model_name)
