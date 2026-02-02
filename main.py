@@ -50,7 +50,7 @@ def ask_gemini(prompt):
     try:
         genai.configure(api_key=KEY_GEMINI)
 
-        model_name = "gemini-1.5-flash"
+        model_name = "gemini-1.5-flash-latest"
         try:
             model = genai.GenerativeModel(model_name)
         except:
@@ -83,7 +83,7 @@ def ask_openai(context):
         client = OpenAI(api_key=KEY_OPENAI)
         return (
             client.chat.completions.create(
-                model="gpt-5-mini",
+                model="gpt-4o-mini",
                 messages=[
                     {
                         "role": "user",
