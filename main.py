@@ -1,186 +1,151 @@
-import yfinance as yf
+import os
+import sys
+import json
 import smtplib
+from datetime import datetime
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import os
-import json
-import sys
 
-EMAIL_USER = os.environ.get("EMAIL_USER")
-EMAIL_PASS = os.environ.get("EMAIL_PASS")
-RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
+try:
+    import yfinance as yf
+    import google.generativeai as genai
+    from openai import OpenAI
+except ImportError as e:
+    print(f"Library missing: {e}")
+    sys.exit(1)
 
-STATE_FILE = "stock_states.json"
-CONFIG_FILE = "config.json"
+ENV = os.environ
+KEY_GEMINI = ENV.get("GEMINI_API_KEY")
+KEY_OPENAI = ENV.get("OPENAI_API_KEY")
+MAIL_USER = ENV.get("EMAIL_USER")
+MAIL_PASS = ENV.get("EMAIL_PASS")
+MAIL_RCVR = ENV.get("RECEIVER_EMAIL")
 
 
-def load_config():
-    if not os.path.exists(CONFIG_FILE):
-        print(f"ERROR: {CONFIG_FILE} not found! Please create the file.")
-        return {"tickers": [], "target_prices": {}}
-
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+def get_json(path):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception as e:
-        print(f"ERROR: An error occurred while reading the config file: {e}")
-        return {"tickers": [], "target_prices": {}}
-
-
-config_data = load_config()
-tickers = config_data.get("tickers", [])
-TARGET_PRICES = config_data.get("target_prices", {})
-
-
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except:
-            return {}
     return {}
 
 
-def save_state(states):
-    with open(STATE_FILE, "w") as f:
-        json.dump(states, f)
-
-
-def send_email(subject, alert_message):
-    if not EMAIL_USER or not EMAIL_PASS or not RECEIVER_EMAIL:
-        print("Email credentials not set. Skipping email.")
-        return
-
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_USER
-    msg["To"] = RECEIVER_EMAIL
-    msg["Subject"] = subject
-
-    msg.attach(MIMEText(alert_message, "plain"))
-
+def get_market_data(ticker):
     try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASS)
-        server.sendmail(EMAIL_USER, RECEIVER_EMAIL, msg.as_string())
-        server.quit()
-        print(f"Email sent: {subject}")
-    except Exception as e:
-        print(f"Error sending email: {e}")
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1mo")
+        if hist.empty:
+            return None
+        return {
+            "symbol": ticker,
+            "price": round(hist["Close"].iloc[-1], 2),
+            "prev": round(hist["Close"].iloc[-2], 2) if len(hist) > 1 else 0,
+        }
+    except:
+        return None
 
 
-def check_stocks():
-    if not tickers:
-        print("Stock watchlist is empty. Verify the config.json file.")
-        return
+def ask_gemini(prompt):
+    if not (genai and KEY_GEMINI):
+        return "Gemini API Key missing."
+    try:
+        genai.configure(api_key=KEY_GEMINI)
 
-    avg_alerts = []
-    max_alerts = []
-    custom_alerts = []
-
-    current_states = load_state()
-    new_states = {}
-
-    print(f"Checking {len(tickers)} stocks from config...")
-
-    for symbol in tickers:
+        model_name = "gemini-1.5-flash"
         try:
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="1y")
+            model = genai.GenerativeModel(model_name)
+        except:
+            model = genai.GenerativeModel("gemini-pro")
 
-            if hist.empty:
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+
+        response = model.generate_content(prompt, safety_settings=safety_settings)
+
+        if response.parts:
+            return response.text
+        elif response.prompt_feedback:
+            return f"Gemini Did Not Respond (Blocked): {response.prompt_feedback}"
+        else:
+            return "Gemini returned empty response."
+
+    except Exception as e:
+        return f"Gemini Error: {str(e)}"
+
+
+def ask_openai(context):
+    if not (OpenAI and KEY_OPENAI):
+        return "OpenAI API Key missing."
+    try:
+        client = OpenAI(api_key=KEY_OPENAI)
+        return (
+            client.chat.completions.create(
+                model="gpt-5-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": f"Critique the analysis below, specify risks and write a short conclusion:\n{context}",
+                    }
+                ],
+            )
+            .choices[0]
+            .message.content
+        )
+    except Exception as e:
+        return f"OpenAI Error: {str(e)}"
+
+
+def send_report(body):
+    if not (MAIL_USER and MAIL_PASS and MAIL_RCVR):
+        return
+    msg = MIMEMultipart()
+    msg["Subject"] = f"Stock Market Report - {datetime.now().strftime('%d-%m-%Y')}"
+    msg["From"] = MAIL_USER
+    msg["To"] = MAIL_RCVR
+    msg.attach(MIMEText(body, "plain"))
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587) as s:
+            s.starttls()
+            s.login(MAIL_USER, MAIL_PASS)
+            s.send_message(msg)
+    except Exception as e:
+        print(f"Mail Error: {e}")
+
+
+def main():
+    config = get_json("config.json")
+    report = f"DAILY FINANCE REPORT\n{'='*30}\n\n"
+
+    targets = config.get("target_prices", {})
+    if targets:
+        report += "SCENARIO 1: PORTFOLIO ANALYSIS\n" + "-" * 30 + "\n"
+        for t, info in targets.items():
+            data = get_market_data(t)
+            if not data:
                 continue
+            cost = info.get("buy_price", "Unknown")
+            prompt = f"Stock: {t}. Cost: {cost}. Price: {data['price']}. Buy/Sell/Hold?"
+            gemini_res = ask_gemini(prompt)
+            chatgpt_res = ask_openai(gemini_res)
+            report += f"[{t}] Price: {data['price']}\nANALYST (Gemini): {gemini_res[:400]}...\nRISK (ChatGPT): {chatgpt_res}\n\n"
 
-            current_price = hist["Close"].iloc[-1]
-            yearly_avg = hist["Close"].mean()
-            yearly_max = hist["Close"].max()
+    tickers = config.get("tickers", [])
+    if tickers:
+        report += "SCENARIO 2: MARKET SCAN (TOP 5)\n" + "-" * 30 + "\n"
+        for t in tickers[:5]:
+            data = get_market_data(t)
+            if not data:
+                continue
+            gemini_res = ask_gemini(
+                f"Stock: {t}. Price: {data['price']}. Is it a buying opportunity?"
+            )
+            report += f"[{t}] {gemini_res[:300]}...\n\n"
 
-            avg_threshold = yearly_avg * 0.80
-            max_threshold = yearly_max * 0.70
-
-            prev_state = current_states.get(symbol, {})
-            if isinstance(prev_state, bool):
-                prev_state = {"avg_below": prev_state, "max_below": False}
-
-            was_below_avg = prev_state.get("avg_below", False)
-            was_below_max = prev_state.get("max_below", False)
-
-            is_below_avg = bool(current_price < avg_threshold)
-            is_below_max = bool(current_price < max_threshold)
-
-            new_states[symbol] = {
-                "avg_below": is_below_avg,
-                "max_below": is_below_max,
-                "custom_low_below": prev_state.get("custom_low_below", False),
-                "custom_high_above": prev_state.get("custom_high_above", False),
-            }
-
-            if is_below_avg and not was_below_avg:
-                diff = ((yearly_avg - current_price) / yearly_avg) * 100
-                avg_alerts.append(
-                    f"🔻 DROP (AVG): {symbol} is {diff:.2f}% below yearly avg. Price: {current_price:.2f}"
-                )
-
-            elif not is_below_avg and was_below_avg:
-                pass
-
-            if is_below_max and not was_below_max:
-                diff = ((yearly_max - current_price) / yearly_max) * 100
-                max_alerts.append(
-                    f"🔻 DROP (MAX): {symbol} is {diff:.2f}% below yearly max. Price: {current_price:.2f}"
-                )
-
-            elif not is_below_max and was_below_max:
-                pass
-
-            if symbol in TARGET_PRICES:
-                targets = TARGET_PRICES[symbol]
-                low_limit = targets.get("low")
-                high_limit = targets.get("high")
-
-                was_below_custom_low = prev_state.get("custom_low_below", False)
-                was_above_custom_high = prev_state.get("custom_high_above", False)
-
-                if low_limit:
-                    is_below_custom_low = bool(current_price < low_limit)
-                    new_states[symbol]["custom_low_below"] = is_below_custom_low
-
-                    if is_below_custom_low and not was_below_custom_low:
-                        custom_alerts.append(
-                            f"🔻 CUSTOM LOW ALERT: {symbol} dropped below {low_limit} TL. Current: {current_price:.2f}"
-                        )
-                    elif not is_below_custom_low and was_below_custom_low:
-                        custom_alerts.append(
-                            f"🚀 CUSTOM RECOVERY: {symbol} rose back above {low_limit} TL. Current: {current_price:.2f}"
-                        )
-
-                if high_limit:
-                    is_above_custom_high = bool(current_price > high_limit)
-                    new_states[symbol]["custom_high_above"] = is_above_custom_high
-
-                    if is_above_custom_high and not was_above_custom_high:
-                        custom_alerts.append(
-                            f"🚀 CUSTOM HIGH ALERT: {symbol} rose above {high_limit} TL. Current: {current_price:.2f}"
-                        )
-                    elif not is_above_custom_high and was_above_custom_high:
-                        custom_alerts.append(
-                            f"🔻 CUSTOM PULLBACK: {symbol} dropped back below {high_limit} TL. Current: {current_price:.2f}"
-                        )
-
-        except Exception as e:
-            print(f"Error checking {symbol}: {e}")
-            continue
-
-    if avg_alerts:
-        send_email("🚨 BIST Average Alert", "\n".join(avg_alerts))
-    if max_alerts:
-        send_email("📉 BIST Max Drop Alert", "\n".join(max_alerts))
-    if custom_alerts:
-        send_email("🎯 BIST Custom Price Alert", "\n\n".join(custom_alerts))
-
-    save_state(new_states)
+    send_report(report)
 
 
 if __name__ == "__main__":
-    check_stocks()
+    main()

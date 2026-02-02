@@ -101,23 +101,28 @@
     "target_prices": {
         "KONTR.IS": {
             "low": 9.10,
-            "high": 10.26
+            "high": 10.26,
+            "purchase_price": 9.75
         },
         "SASA.IS": {
             "low": 2.26,
-            "high": 2.86
+            "high": 2.86,
+            "purchase_price": 2.40
         },
         "ALTNY.IS": {
             "low": 15.75,
-            "high": 17.75
+            "high": 17.75,
+            "purchase_price": 16.75
         }, 
         "PATEK.IS": {
             "low": 19.53,
-            "high": 22.03
+            "high": 22.03,
+            "purchase_price": 20.78
         },
         "TKFEN.IS": {
             "low": 73.40,
-            "high": 84.10
+            "high": 84.10,
+            "purchase_price": 76.30
         }
     }
 }

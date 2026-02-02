@@ -3,6 +3,7 @@ name: BIST Stock Tracker
 on:
   schedule:
     - cron: '15 6-14 * * 1-5'
+    - cron: '15 9 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -11,6 +12,7 @@ permissions:
 jobs:
   track-and-alert:
     runs-on: ubuntu-latest
+    if: github.event.schedule != '15 9 * * 1-5'
     steps:
       - uses: actions/checkout@v3
       
@@ -36,3 +38,26 @@ jobs:
           git add stock_states.json
           git commit -m "Update stock states" || exit 0
           git push
+
+  daily-ai-analysis:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '15 9 * * 1-5' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+        
+      - name: Run Daily AI Analysis
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python main.py daily_analysis
