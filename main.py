@@ -12,7 +12,7 @@ try:
     import google.generativeai as genai
     from openai import OpenAI
 except ImportError as e:
-    print(f"Library missing: {e}")
+    print(f"Kutuphane eksik: {e}")
     sys.exit(1)
 
 load_dotenv()
@@ -37,101 +37,26 @@ def get_market_data(ticker):
         hist = stock.history(period="1mo")
         if hist.empty:
             return None
-        return {
-            "symbol": ticker,
-            "price": round(hist["Close"].iloc[-1], 2),
-            "prev": round(hist["Close"].iloc[-2], 2) if len(hist) > 1 else 0,
-        }
+        return {"symbol": ticker, "price": round(hist["Close"].iloc[-1], 2)}
     except:
         return None
 
 
 def ask_gemini(prompt):
     if not (genai and KEY_GEMINI):
-        return "Gemini API Key missing."
+        return "Gemini API Key eksik."
     try:
         genai.configure(api_key=KEY_GEMINI)
-
-        candidate_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
-            "gemini-1.5-mini",
-            "gemini-1.5",
-            "gemini-pro",
-            "gemini-mini",
-        ]
-
-        safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
-
-        last_err = None
-        for model_name in candidate_models:
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(
-                    prompt, safety_settings=safety_settings
-                )
-                if getattr(response, "parts", None):
-                    return response.text
-                elif getattr(response, "prompt_feedback", None):
-                    return (
-                        f"Gemini Did Not Respond (Blocked): {response.prompt_feedback}"
-                    )
-                else:
-                    return "Gemini returned empty response."
-            except Exception as e:
-                last_err = e
-                continue
-
-        try:
-            if hasattr(genai, "list_models"):
-                available = genai.list_models()
-                return f"Gemini Error: {last_err}. Available models: {available}"
-        except Exception:
-            pass
-
-        return f"Gemini Error: {last_err}"
-
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        return f"Gemini Error: {str(e)}"
-    if not (genai and KEY_GEMINI):
-        return "Gemini API Key missing."
-    try:
-        genai.configure(api_key=KEY_GEMINI)
-
-        model_name = "gemini-1.5-flash"
-        try:
-            model = genai.GenerativeModel(model_name)
-        except:
-            model = genai.GenerativeModel("gemini-pro")
-
-        safety_settings = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        ]
-
-        response = model.generate_content(prompt, safety_settings=safety_settings)
-
-        if response.parts:
-            return response.text
-        elif response.prompt_feedback:
-            return f"Gemini Did Not Respond (Blocked): {response.prompt_feedback}"
-        else:
-            return "Gemini returned empty response."
-
-    except Exception as e:
-        return f"Gemini Error: {str(e)}"
+        return f"Gemini Hatasi: {str(e)}"
 
 
 def ask_openai(context):
     if not (OpenAI and KEY_OPENAI):
-        return "OpenAI API Key missing."
+        return "OpenAI API Key eksik."
     try:
         client = OpenAI(api_key=KEY_OPENAI)
         return (
@@ -140,7 +65,7 @@ def ask_openai(context):
                 messages=[
                     {
                         "role": "user",
-                        "content": f"Critique the analysis below, specify risks and write a short conclusion:\n{context}",
+                        "content": f"Analizi elestir ve riskleri belirt:\n{context}",
                     }
                 ],
             )
@@ -148,14 +73,14 @@ def ask_openai(context):
             .message.content
         )
     except Exception as e:
-        return f"OpenAI Error: {str(e)}"
+        return f"OpenAI Hatasi: {str(e)}"
 
 
 def send_report(body):
     if not (MAIL_USER and MAIL_PASS and MAIL_RCVR):
         return
     msg = MIMEMultipart()
-    msg["Subject"] = f"Stock Market Report - {datetime.now().strftime('%d-%m-%Y')}"
+    msg["Subject"] = f"Borsa Analizi - {datetime.now().strftime('%d-%m-%Y')}"
     msg["From"] = MAIL_USER
     msg["To"] = MAIL_RCVR
     msg.attach(MIMEText(body, "plain"))
@@ -165,39 +90,27 @@ def send_report(body):
             s.login(MAIL_USER, MAIL_PASS)
             s.send_message(msg)
     except Exception as e:
-        print(f"Mail Error: {e}")
+        print(f"Mail Hatasi: {e}")
 
 
 def main():
     config = get_json("config.json")
-    report = f"DAILY FINANCE REPORT\n{'='*30}\n\n"
+    report = "GUNLUK FINANS ANALIZI\n" + "=" * 25 + "\n\n"
 
     targets = config.get("target_prices", {})
+    for t, info in targets.items():
+        data = get_market_data(t)
+        if not data:
+            continue
+
+        prompt = f"Hisse: {t}. Maliyet: {info.get('buy_price')}. Fiyat: {data['price']}. Yorumla."
+        gemini_res = ask_gemini(prompt)
+        chatgpt_res = ask_openai(gemini_res)
+
+        report += f"[{t}] Fiyat: {data['price']}\nAI: {gemini_res[:300]}...\nRISK: {chatgpt_res}\n\n"
+
     if targets:
-        report += "SCENARIO 1: PORTFOLIO ANALYSIS\n" + "-" * 30 + "\n"
-        for t, info in targets.items():
-            data = get_market_data(t)
-            if not data:
-                continue
-            cost = info.get("buy_price", "Unknown")
-            prompt = f"Stock: {t}. Cost: {cost}. Price: {data['price']}. Buy/Sell/Hold?"
-            gemini_res = ask_gemini(prompt)
-            chatgpt_res = ask_openai(gemini_res)
-            report += f"[{t}] Price: {data['price']}\nANALYST (Gemini): {gemini_res[:400]}...\nRISK (ChatGPT): {chatgpt_res}\n\n"
-
-    tickers = config.get("tickers", [])
-    if tickers:
-        report += "SCENARIO 2: MARKET SCAN (TOP 5)\n" + "-" * 30 + "\n"
-        for t in tickers[:5]:
-            data = get_market_data(t)
-            if not data:
-                continue
-            gemini_res = ask_gemini(
-                f"Stock: {t}. Price: {data['price']}. Is it a buying opportunity?"
-            )
-            report += f"[{t}] {gemini_res[:300]}...\n\n"
-
-    send_report(report)
+        send_report(report)
 
 
 if __name__ == "__main__":
