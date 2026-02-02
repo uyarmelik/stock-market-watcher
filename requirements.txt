@@ -1,5 +1,5 @@
 yfinance
 pandas
-google-generativeai>=0.7.0
+google-genai
 openai
 python-dotenv
