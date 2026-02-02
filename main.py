@@ -52,7 +52,7 @@ def ask_gemini(prompt):
     try:
         genai.configure(api_key=KEY_GEMINI)
 
-        model_name = "gemini-1.5-flash-latest"
+        model_name = "gemini-1.5-flash"
         try:
             model = genai.GenerativeModel(model_name)
         except:
