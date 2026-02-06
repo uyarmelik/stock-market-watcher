@@ -1,15 +1,15 @@
 {
-  "updated_at": "2026-02-06T12:28:30",
+  "updated_at": "2026-02-06T13:41:02",
   "targets": {
     "KONTR.IS": {
-      "price": 9.95,
+      "price": 9.84,
       "status": "IN_RANGE",
       "purchase_price": 9.75,
       "low": 9.1,
       "high": 10.26
     },
     "SASA.IS": {
-      "price": 2.43,
+      "price": 2.38,
       "status": "IN_RANGE",
       "purchase_price": 2.4,
       "low": 2.26,
@@ -23,7 +23,7 @@
       "high": 17.75
     },
     "PATEK.IS": {
-      "price": 19.77,
+      "price": 19.67,
       "status": "IN_RANGE",
       "purchase_price": 20.78,
       "low": 19.53,
