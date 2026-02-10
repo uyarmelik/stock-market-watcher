@@ -588,24 +588,50 @@ def send_email(subject: str, body: str) -> bool:
 def format_opportunity_email_plain_english(
     opportunities: List[Dict[str, Any]], title: str
 ) -> Tuple[str, str]:
-    """Mentorship-style email: plain English, Entry Price, Target Exit Price."""
+    """Mentorship-style email: plain English, Entry Price, Target Exit Price. Subject is always 'Daily Recommendation - Date'. Strong Sell then Strong Buy, each sorted alphabetically by ticker, numbered."""
     today = datetime.now().strftime("%d-%m-%Y")
-    lines = [f"{title} — {today}", ""]
-    for o in opportunities:
+    subject = f"Daily Recommendation - {today}"
+
+    strong_sell = sorted(
+        [o for o in opportunities if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    strong_buy = sorted(
+        [o for o in opportunities if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    n_sell, n_buy = len(strong_sell), len(strong_buy)
+
+    lines = [
+        f"Strong Sell: {n_sell}  |  Strong Buy: {n_buy}",
+        "",
+    ]
+    num = 1
+    for o in strong_sell:
         ticker = o.get("ticker", "")
-        verdict = o.get("verdict", "")
         entry = o.get("entry_price")
         target = o.get("target_exit_price")
         reason = (o.get("reason") or "").strip() or "No additional comment."
         entry_s = f"{entry:.2f}" if entry is not None else "N/A"
         target_s = f"{target:.2f}" if target is not None else "N/A"
-        lines.append(f"• {ticker}: {verdict}")
-        lines.append(f"  Entry price: {entry_s}")
-        lines.append(f"  Target exit price: {target_s}")
-        lines.append(f"  Reason: {reason}")
+        lines.append(f"{num}. {ticker}: STRONG SELL")
+        lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
+        lines.append(f"   Reason: {reason}")
         lines.append("")
+        num += 1
+    for o in strong_buy:
+        ticker = o.get("ticker", "")
+        entry = o.get("entry_price")
+        target = o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        lines.append(f"{num}. {ticker}: STRONG BUY")
+        lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
+        lines.append(f"   Reason: {reason}")
+        lines.append("")
+        num += 1
     lines.append("This is not investment advice; for informational purposes only.")
-    subject = f"{title} — {today}"
     return subject, "\n".join(lines)
 
 
