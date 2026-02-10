@@ -876,42 +876,46 @@ def run_drop_detector() -> None:
     if not alerts_sent_this_run and not band_alerts:
         return
 
-    lines = []
+    now = datetime.now()
+    subject = f"Urgent Opportunity - {now.strftime('%d-%m-%Y %H:%M')}"
+
+    parts: List[str] = []
     if alerts_sent_this_run:
-        lines.extend([
-            "Urgent Opportunity / Alert — Price drop detected",
-            "",
-            "The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).",
-            "",
-        ])
-        for a in alerts_sent_this_run:
+        parts.append("The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).")
+        parts.append("<br>")
+        parts.append("<br>")
+        for i, a in enumerate(alerts_sent_this_run, 1):
             t = a.get("ticker", "")
             p = a.get("price")
-            lines.append(f"• {t}: current price {p:.2f}")
+            parts.append(f"<b>{i}. {t}</b>: current price {p:.2f}")
+            parts.append("<br>")
             if a.get("below_sma20_pct"):
-                lines.append("  — Price is 20% or more below the 1-year average.")
+                parts.append("  — Price is 20% or more below the 1-year average.")
+                parts.append("<br>")
             if a.get("below_high30_pct"):
-                lines.append("  — Price is 30% or more below the 52-week high.")
-            lines.append("")
+                parts.append("  — Price is 30% or more below the 52-week high.")
+                parts.append("<br>")
+            parts.append("<br>")
     if band_alerts:
-        if lines:
-            lines.append("")
-        lines.extend([
-            "Price band alert (vs your purchase price ±5%)",
-            "",
-        ])
-        for a in band_alerts:
+        parts.append("<br>")
+        parts.append("<br>")
+        parts.append("<br>")
+        parts.append("<b>PRICE BAND ALERT</b>")
+        parts.append("<br>")
+        parts.append("<br>")
+        for i, a in enumerate(band_alerts, 1):
             t = a.get("ticker", "")
             p = a.get("price")
             pp = a.get("purchase_price")
             if a.get("kind") == "below":
-                lines.append(f"• {t}: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
             else:
-                lines.append(f"• {t}: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
-            lines.append("")
-    lines.append("This is not investment advice; for informational purposes only.")
-    subject = "Urgent Opportunity / Alert — Drop detected"
-    send_email(subject, "\n".join(lines))
+                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            parts.append("<br>")
+            parts.append("<br>")
+    parts.append("This is not investment advice; for informational purposes only.")
+    body = "<html><body>" + "".join(parts) + "</body></html>"
+    send_email(subject, body, body_subtype="html")
 
 
 # ---------- Scheduler ----------
