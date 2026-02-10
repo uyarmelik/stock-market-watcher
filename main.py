@@ -285,8 +285,14 @@ def build_snapshots(
             r21 = pct_return(close, 21)
             tp = target_prices.get(t, {}) if isinstance(target_prices, dict) else {}
             purchase_price = safe_float(tp.get("purchase_price"))
+            # Auto low/high from purchase_price ±5% when not set in config
             low = safe_float(tp.get("low"))
             high = safe_float(tp.get("high"))
+            if purchase_price is not None:
+                if low is None:
+                    low = round(purchase_price * 0.95, 2)
+                if high is None:
+                    high = round(purchase_price * 1.05, 2)
             base = baseline_action(price, sma20, sma50, rsi14)
             snapshots.append(
                 StockSnapshot(
@@ -586,28 +592,36 @@ def send_email(subject: str, body: str) -> bool:
 
 
 def format_opportunity_email_plain_english(
-    opportunities: List[Dict[str, Any]], title: str
+    opportunities: List[Dict[str, Any]],
+    title: str,
+    target_prices: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
-    """Mentorship-style email: plain English, Entry Price, Target Exit Price. Subject is always 'Daily Recommendation - Date'. Strong Sell then Strong Buy, each sorted alphabetically by ticker, numbered."""
+    """Mentorship-style email: plain English, Entry Price, Target Exit Price. Subject is always 'Daily Recommendation - Date'. Main list excludes target_prices tickers; those are listed at the end with Your purchase price. Strong Sell then Strong Buy, each sorted alphabetically."""
     today = datetime.now().strftime("%d-%m-%Y")
     subject = f"Daily Recommendation - {today}"
+    target_prices = target_prices or {}
 
-    strong_sell = sorted(
-        [o for o in opportunities if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+    # Main list: only tickers NOT in target_prices (watchlist opportunities)
+    main_opps = [o for o in opportunities if o.get("ticker", "") not in target_prices]
+    # Owned positions: tickers IN target_prices (listed at the end)
+    owned_opps = [o for o in opportunities if o.get("ticker", "") in target_prices]
+
+    strong_sell_main = sorted(
+        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
         key=lambda o: (o.get("ticker") or ""),
     )
-    strong_buy = sorted(
-        [o for o in opportunities if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+    strong_buy_main = sorted(
+        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
         key=lambda o: (o.get("ticker") or ""),
     )
-    n_sell, n_buy = len(strong_sell), len(strong_buy)
+    n_sell, n_buy = len(strong_sell_main), len(strong_buy_main)
 
     lines = [
         f"Strong Sell: {n_sell}  |  Strong Buy: {n_buy}",
         "",
     ]
     num = 1
-    for o in strong_sell:
+    for o in strong_sell_main:
         ticker = o.get("ticker", "")
         entry = o.get("entry_price")
         target = o.get("target_exit_price")
@@ -619,7 +633,7 @@ def format_opportunity_email_plain_english(
         lines.append(f"   Reason: {reason}")
         lines.append("")
         num += 1
-    for o in strong_buy:
+    for o in strong_buy_main:
         ticker = o.get("ticker", "")
         entry = o.get("entry_price")
         target = o.get("target_exit_price")
@@ -632,6 +646,54 @@ def format_opportunity_email_plain_english(
         lines.append("")
         num += 1
     lines.append("This is not investment advice; for informational purposes only.")
+
+    # At the end: owned positions (target_prices), STRONG SELL then STRONG BUY, alphabetically; show Your purchase price above Entry price
+    if owned_opps and target_prices:
+        strong_sell_owned = sorted(
+            [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+            key=lambda o: (o.get("ticker") or ""),
+        )
+        strong_buy_owned = sorted(
+            [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+            key=lambda o: (o.get("ticker") or ""),
+        )
+        lines.append("")
+        lines.append("MY POSITIONS")
+        lines.append("")
+        num_owned = 1
+        for o in strong_sell_owned:
+            ticker = o.get("ticker", "")
+            tp = target_prices.get(ticker, {}) if isinstance(target_prices, dict) else {}
+            purchase = safe_float(tp.get("purchase_price"))
+            entry = o.get("entry_price")
+            target = o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            lines.append(f"{num_owned}. {ticker}: STRONG SELL")
+            lines.append(f"   Your purchase price: {purchase_s}")
+            lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
+            lines.append(f"   Reason: {reason}")
+            lines.append("")
+            num_owned += 1
+        for o in strong_buy_owned:
+            ticker = o.get("ticker", "")
+            tp = target_prices.get(ticker, {}) if isinstance(target_prices, dict) else {}
+            purchase = safe_float(tp.get("purchase_price"))
+            entry = o.get("entry_price")
+            target = o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            lines.append(f"{num_owned}. {ticker}: STRONG BUY")
+            lines.append(f"   Your purchase price: {purchase_s}")
+            lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
+            lines.append(f"   Reason: {reason}")
+            lines.append("")
+            num_owned += 1
+
     return subject, "\n".join(lines)
 
 
@@ -678,7 +740,9 @@ def run_opportunity_hunter() -> None:
         return  # Do not send email when no approved opportunities
 
     subject, body = format_opportunity_email_plain_english(
-        all_opportunities, "Stock Opportunity Hunter — Approved Signals"
+        all_opportunities,
+        "Stock Opportunity Hunter — Approved Signals",
+        target_prices=target_prices,
     )
     send_email(subject, body)
 
@@ -708,10 +772,10 @@ def get_yearly_metrics(ticker: str) -> Optional[Dict[str, float]]:
 
 
 def run_drop_detector() -> None:
-    """Check all tickers from config for 20% below SMA252 or 30% below 52w high; manage alert_states.json; send Urgent Alert email when needed."""
+    """Check: (1) 20% below SMA252 or 30% below 52w high; (2) target_prices: price vs purchase ±5% band. Send one email only when there is at least one alert."""
     config = read_json(CONFIG_PATH)
     tickers = list(config.get("tickers", []))
-    target_prices = config.get("target_prices", {})
+    target_prices = config.get("target_prices", {}) or {}
     if isinstance(target_prices, dict):
         for t in target_prices:
             if t not in tickers:
@@ -721,6 +785,7 @@ def run_drop_detector() -> None:
 
     states = read_json(ALERT_STATES_PATH)
     alerts_sent_this_run: List[Dict[str, Any]] = []
+    band_alerts: List[Dict[str, Any]] = []
 
     for ticker in tickers:
         try:
@@ -730,65 +795,108 @@ def run_drop_detector() -> None:
             price = m["price"]
             sma252 = m["sma252"]
             high_52w = m["high_52w"]
+            st = dict(states.get(ticker, {}))
+
+            # --- Drop detector (SMA252 / 52w high) ---
             below_sma20 = sma252 > 0 and price <= sma252 * 0.80
             below_high30 = high_52w > 0 and price <= high_52w * 0.70
             if not (below_sma20 or below_high30):
-                # Reset state when price recovered above thresholds
                 if ticker in states:
-                    st = states[ticker]
                     last_price = safe_float(st.get("last_alert_price"))
                     if last_price and price >= max(sma252 * 0.81, high_52w * 0.71):
                         st["sent"] = False
-                continue
+                states[ticker] = st
+                # Band check still runs below for target_prices; do not continue here
+            else:
+                already_sent = st.get("sent", False)
+                last_alert_price = safe_float(st.get("last_alert_price"))
+                if last_alert_price is not None and price <= last_alert_price * 0.95:
+                    already_sent = False
+                if not already_sent:
+                    alerts_sent_this_run.append({
+                        "ticker": ticker,
+                        "price": price,
+                        "sma252": sma252,
+                        "high_52w": high_52w,
+                        "below_sma20_pct": below_sma20,
+                        "below_high30_pct": below_high30,
+                    })
+                    st["sent"] = True
+                    st["last_alert_price"] = price
+                    st["last_alert_at"] = datetime.now().isoformat(timespec="seconds")
 
-            st = states.get(ticker, {})
-            already_sent = st.get("sent", False)
-            last_alert_price = safe_float(st.get("last_alert_price"))
+            # --- Band alert: purchase_price ±5% (only for target_prices) ---
+            if ticker in target_prices:
+                tp = target_prices.get(ticker, {}) or {}
+                purchase_price = safe_float(tp.get("purchase_price"))
+                if purchase_price is not None and purchase_price > 0:
+                    band_low = round(purchase_price * 0.95, 2)
+                    band_high = round(purchase_price * 1.05, 2)
+                    if price <= band_low:
+                        if not st.get("band_below_sent", False):
+                            band_alerts.append({
+                                "ticker": ticker,
+                                "price": price,
+                                "purchase_price": purchase_price,
+                                "kind": "below",
+                            })
+                            st["band_below_sent"] = True
+                    elif price >= band_high:
+                        if not st.get("band_above_sent", False):
+                            band_alerts.append({
+                                "ticker": ticker,
+                                "price": price,
+                                "purchase_price": purchase_price,
+                                "kind": "above",
+                            })
+                            st["band_above_sent"] = True
+                    else:
+                        st["band_below_sent"] = False
+                        st["band_above_sent"] = False
 
-            # Reset if new dip (5% lower than last alert)
-            if last_alert_price is not None and price <= last_alert_price * 0.95:
-                already_sent = False
-
-            if already_sent:
-                continue
-
-            alerts_sent_this_run.append({
-                "ticker": ticker,
-                "price": price,
-                "sma252": sma252,
-                "high_52w": high_52w,
-                "below_sma20_pct": below_sma20,
-                "below_high30_pct": below_high30,
-            })
-            states[ticker] = {
-                "sent": True,
-                "last_alert_price": price,
-                "last_alert_at": datetime.now().isoformat(timespec="seconds"),
-            }
+            states[ticker] = st
         except Exception as e:
             print(f"Drop Detector ticker {ticker} error: {e}")
             continue
 
     write_json(ALERT_STATES_PATH, states)
 
-    if not alerts_sent_this_run:
+    if not alerts_sent_this_run and not band_alerts:
         return
 
-    lines = [
-        "Urgent Opportunity / Alert — Price drop detected",
-        "",
-        "The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).",
-        "",
-    ]
-    for a in alerts_sent_this_run:
-        t = a.get("ticker", "")
-        p = a.get("price")
-        lines.append(f"• {t}: current price {p:.2f}")
-        if a.get("below_sma20_pct"):
-            lines.append("  — Price is 20% or more below the 1-year average.")
-        if a.get("below_high30_pct"):
-            lines.append("  — Price is 30% or more below the 52-week high.")
-        lines.append("")
+    lines = []
+    if alerts_sent_this_run:
+        lines.extend([
+            "Urgent Opportunity / Alert — Price drop detected",
+            "",
+            "The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).",
+            "",
+        ])
+        for a in alerts_sent_this_run:
+            t = a.get("ticker", "")
+            p = a.get("price")
+            lines.append(f"• {t}: current price {p:.2f}")
+            if a.get("below_sma20_pct"):
+                lines.append("  — Price is 20% or more below the 1-year average.")
+            if a.get("below_high30_pct"):
+                lines.append("  — Price is 30% or more below the 52-week high.")
+            lines.append("")
+    if band_alerts:
+        if lines:
+            lines.append("")
+        lines.extend([
+            "Price band alert (vs your purchase price ±5%)",
+            "",
+        ])
+        for a in band_alerts:
+            t = a.get("ticker", "")
+            p = a.get("price")
+            pp = a.get("purchase_price")
+            if a.get("kind") == "below":
+                lines.append(f"• {t}: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            else:
+                lines.append(f"• {t}: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            lines.append("")
     lines.append("This is not investment advice; for informational purposes only.")
     subject = "Urgent Opportunity / Alert — Drop detected"
     send_email(subject, "\n".join(lines))
@@ -892,7 +1000,9 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
     )
     if all_recs:
         subject, body = format_opportunity_email_plain_english(
-            all_recs, "Daily Recommendation — Approved Signals"
+            all_recs,
+            "Daily Recommendation — Approved Signals",
+            target_prices=target_prices,
         )
         send_email(subject, body)
     else:
