@@ -3,3 +3,4 @@ pandas
 google-genai
 openai
 python-dotenv
+schedule

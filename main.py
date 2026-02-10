@@ -1,9 +1,16 @@
+"""
+Stock Market Watcher — AI-powered exchange tracking assistant.
+Uses a debate loop (Gemini vs OpenAI) for high-confidence signals only.
+Scheduler: Opportunity Hunter (weekdays 12:15) + Drop Detector (weekdays 10–17, hourly).
+"""
+
 import argparse
 import json
 import os
 import re
 import smtplib
 import sys
+import time
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -12,6 +19,7 @@ from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
+import schedule
 import yfinance as yf
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -28,11 +36,19 @@ MAIL_PASS = ENV.get("EMAIL_PASS")
 MAIL_RCVR = ENV.get("RECEIVER_EMAIL")
 
 GEMINI_MODEL = ENV.get("GEMINI_MODEL", "gemini-2.5-flash")
-OPENAI_MODEL = ENV.get("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = ENV.get("OPENAI_MODEL", "gpt-4o")
 
 BIST_EQUITY_CSV_URL = ENV.get(
-    "BIST_EQUITY_CSV_URL", "https://www.borsaistanbul.com/datum/hisse_endeks_ds.csv"
+    "BIST_EQUITY_CSV_URL",
+    "https://www.borsaistanbul.com/datum/hisse_endeks_ds.csv",
 )
+
+CONFIG_PATH = "config.json"
+STOCK_STATES_PATH = "stock_states.json"
+ALERT_STATES_PATH = "alert_states.json"
+
+# Verdicts that require both models to agree; anything else is filtered out.
+STRONG_VERDICTS = ("STRONG BUY", "STRONG SELL")
 
 
 @dataclass
@@ -51,15 +67,23 @@ class StockSnapshot:
 
 
 def read_json(path: str) -> Dict[str, Any]:
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+    """Load JSON file; return empty dict if missing or invalid."""
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Warning: could not read {path}: {e}")
     return {}
 
 
 def write_json(path: str, obj: Any) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
+    """Write JSON to file with graceful failure."""
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Warning: could not write {path}: {e}")
 
 
 def safe_float(x: Any) -> Optional[float]:
@@ -74,52 +98,34 @@ def safe_float(x: Any) -> Optional[float]:
         return None
 
 
-def fill_missing_tickers(
-    recs: List[Dict[str, Any]], snapshots: List[StockSnapshot]
-) -> None:
-    n = min(len(recs), len(snapshots))
-    for i in range(n):
-        r = recs[i]
-        if not (r.get("ticker") or str(r.get("ticker", "")).strip()):
-            r["ticker"] = snapshots[i].ticker
-
-
-def normalize_action(action: str) -> str:
-    a = (action or "").strip().upper()
-    if a in ("BUY", "SELL", "HOLD"):
-        return a
-    if a == "AL":
-        return "BUY"
-    if a == "SAT":
-        return "SELL"
-    if a == "TUT":
-        return "HOLD"
-    return "HOLD"
-
-
 def extract_json_block(text: str) -> Optional[str]:
     if not text:
         return None
-
     m = re.search(r"\[\s*\{.*\}\s*\]", text, flags=re.DOTALL)
     if m:
         return m.group(0)
-
-    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    m = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, flags=re.DOTALL)
     if m:
         return m.group(0)
-
     return None
+
+
+def normalize_verdict(s: str) -> str:
+    """Normalize model verdict to STRONG BUY | STRONG SELL | HOLD."""
+    t = (s or "").strip().upper()
+    if "STRONG BUY" in t or t == "STRONG_BUY":
+        return "STRONG BUY"
+    if "STRONG SELL" in t or t == "STRONG_SELL":
+        return "STRONG SELL"
+    return "HOLD"
 
 
 def compute_rsi(close: pd.Series, period: int = 14) -> Optional[float]:
     if close is None or close.empty or len(close) < period + 1:
         return None
-
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(period).mean()
     loss = (-delta.clip(upper=0)).rolling(period).mean()
-
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     v = rsi.iloc[-1]
@@ -144,7 +150,6 @@ def baseline_action(
 ) -> str:
     if sma20 is None or sma50 is None or rsi14 is None:
         return "HOLD"
-
     if price > sma20 > sma50 and 55 <= rsi14 <= 70:
         return "BUY"
     if price < sma20 < sma50 and rsi14 <= 45:
@@ -163,10 +168,8 @@ def format_snapshot_line(s: StockSnapshot) -> str:
         f"R21={'' if s.ret_21d_pct is None else f'{s.ret_21d_pct:.1f}%'}",
         f"BASE={s.baseline}",
     ]
-
     if s.purchase_price is not None:
         parts.append(f"MAL={s.purchase_price:.2f}")
-
     return " | ".join(parts)
 
 
@@ -188,7 +191,6 @@ def fetch_bist_tickers_from_borsaistanbul() -> List[str]:
     try:
         raw = urllib.request.urlopen(BIST_EQUITY_CSV_URL, timeout=30).read()
         text = raw.decode("utf-8", errors="ignore")
-
         tickers: List[str] = []
         for line in text.splitlines():
             first = line.split(";")[0].strip()
@@ -198,14 +200,12 @@ def fetch_bist_tickers_from_borsaistanbul() -> List[str]:
             if not sym or len(sym) < 2:
                 continue
             tickers.append(f"{sym}.IS")
-
         seen = set()
         out: List[str] = []
         for t in tickers:
             if t not in seen:
                 out.append(t)
                 seen.add(t)
-
         return out
     except Exception as e:
         print(f"Failed to download BIST ticker list: {e}")
@@ -221,33 +221,34 @@ def load_universe(config: Dict[str, Any], universe: str) -> List[str]:
     return cfg if cfg else fetch_bist_tickers_from_borsaistanbul()
 
 
-def download_history(tickers: List[str], period: str = "3mo") -> Optional[pd.DataFrame]:
+def download_history(
+    tickers: List[str], period: str = "3mo"
+) -> Optional[pd.DataFrame]:
     if not tickers:
         return pd.DataFrame()
-
-    df = yf.download(
-        tickers=tickers,
-        period=period,
-        interval="1d",
-        group_by="ticker",
-        threads=True,
-        auto_adjust=False,
-        progress=False,
-    )
-    if df is None:
+    try:
+        df = yf.download(
+            tickers=tickers,
+            period=period,
+            interval="1d",
+            group_by="ticker",
+            threads=True,
+            auto_adjust=False,
+            progress=False,
+        )
+        return df if df is not None and not df.empty else pd.DataFrame()
+    except Exception as e:
+        print(f"Download history error: {e}")
         return pd.DataFrame()
-    return df
 
 
 def get_close_series(df: pd.DataFrame, ticker: str) -> Optional[pd.Series]:
     if df.empty:
         return None
-
     if isinstance(df.columns, pd.MultiIndex):
         if ticker not in df.columns.get_level_values(0):
             return None
         return df[ticker]["Close"].dropna()
-
     if "Close" not in df.columns:
         return None
     return df["Close"].dropna()
@@ -259,248 +260,222 @@ def build_snapshots(
     period: str = "3mo",
 ) -> List[StockSnapshot]:
     df = download_history(tickers, period=period)
-    if df is None:
+    if df is None or df.empty:
         return []
 
     snapshots: List[StockSnapshot] = []
     for t in tickers:
-        close = get_close_series(df, t)
-        if close is None or close.empty:
-            continue
-
-        price = float(close.iloc[-1])
-        sma20 = (
-            safe_float(close.rolling(20).mean().iloc[-1]) if len(close) >= 20 else None
-        )
-        sma50 = (
-            safe_float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
-        )
-        rsi14 = compute_rsi(close, 14)
-        r5 = pct_return(close, 5)
-        r21 = pct_return(close, 21)
-
-        tp = target_prices.get(t, {}) if isinstance(target_prices, dict) else {}
-        purchase_price = safe_float(tp.get("purchase_price"))
-        low = safe_float(tp.get("low"))
-        high = safe_float(tp.get("high"))
-
-        base = baseline_action(price, sma20, sma50, rsi14)
-
-        snapshots.append(
-            StockSnapshot(
-                ticker=t,
-                price=round(price, 2),
-                sma20=None if sma20 is None else round(sma20, 2),
-                sma50=None if sma50 is None else round(sma50, 2),
-                rsi14=None if rsi14 is None else round(rsi14, 1),
-                ret_5d_pct=None if r5 is None else round(r5, 1),
-                ret_21d_pct=None if r21 is None else round(r21, 1),
-                baseline=base,
-                purchase_price=(
-                    None if purchase_price is None else round(purchase_price, 2)
-                ),
-                target_low=None if low is None else round(low, 2),
-                target_high=None if high is None else round(high, 2),
+        try:
+            close = get_close_series(df, t)
+            if close is None or close.empty:
+                continue
+            price = float(close.iloc[-1])
+            sma20 = (
+                safe_float(close.rolling(20).mean().iloc[-1])
+                if len(close) >= 20
+                else None
             )
-        )
-
+            sma50 = (
+                safe_float(close.rolling(50).mean().iloc[-1])
+                if len(close) >= 50
+                else None
+            )
+            rsi14 = compute_rsi(close, 14)
+            r5 = pct_return(close, 5)
+            r21 = pct_return(close, 21)
+            tp = target_prices.get(t, {}) if isinstance(target_prices, dict) else {}
+            purchase_price = safe_float(tp.get("purchase_price"))
+            low = safe_float(tp.get("low"))
+            high = safe_float(tp.get("high"))
+            base = baseline_action(price, sma20, sma50, rsi14)
+            snapshots.append(
+                StockSnapshot(
+                    ticker=t,
+                    price=round(price, 2),
+                    sma20=None if sma20 is None else round(sma20, 2),
+                    sma50=None if sma50 is None else round(sma50, 2),
+                    rsi14=None if rsi14 is None else round(rsi14, 1),
+                    ret_5d_pct=None if r5 is None else round(r5, 1),
+                    ret_21d_pct=None if r21 is None else round(r21, 1),
+                    baseline=base,
+                    purchase_price=(
+                        None if purchase_price is None else round(purchase_price, 2)
+                    ),
+                    target_low=None if low is None else round(low, 2),
+                    target_high=None if high is None else round(high, 2),
+                )
+            )
+        except Exception as e:
+            print(f"Warning: skip snapshot for {t}: {e}")
+            continue
     return snapshots
 
 
-def gemini_json_recommendations(lines: List[str]) -> Optional[List[Dict[str, Any]]]:
-    if not KEY_GEMINI:
-        print("GEMINI_API_KEY is missing.")
-        return None
+# ---------- Debate loop: Gemini (Round 1 & 3) <-> OpenAI (Round 2 & Final) ----------
 
+SYSTEM_ENGLISH = (
+    "You must respond only in English. Use plain language suitable for someone without financial expertise. "
+    "Avoid jargon; use phrases like 'Price is too high, risk of drop' or 'Price is below average, buying opportunity.'"
+)
+
+def debate_round1_gemini_thesis(
+    snapshots: List[StockSnapshot], intent: str
+) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Round 1: Gemini presents BUY or SELL thesis. intent is 'BUY' or 'SELL'."""
+    if not KEY_GEMINI or not snapshots:
+        return None
+    lines = [format_snapshot_line(s) for s in snapshots]
     prompt = (
-        "You are a short daily recommendation assistant for BIST (Istanbul Stock Exchange) equities.\n"
-        "Use both: (1) the technical data lines below (price, RSI, SMA20, SMA50, 5d/21d returns), and (2) your own search for recent news, earnings, or market context on these tickers or BIST.\n"
+        f"You are a technical analyst for BIST (Istanbul Stock Exchange). Your task is to present a clear {intent} thesis ONLY for stocks that support a {intent}.\n"
         "Rules:\n"
-        "- Return only JSON (no other text).\n"
-        "- action must be exactly one of: BUY, SELL, HOLD\n"
-        "- reason in English, at most 20 words.\n"
-        "- If unsure, choose HOLD.\n"
-        "- BASE field (heuristic) is reference only; do not copy blindly.\n\n"
-        "Produce a JSON array in this format:\n"
-        '[{"ticker":"XXX.IS","action":"BUY|SELL|HOLD","reason":"..."}, ...]\n\n'
-        "Data lines:\n" + "\n".join(lines)
-    )
+        "- Respond ONLY in English. Use plain language (e.g. 'Price is below average, buying opportunity' not 'RSI oversold').\n"
+        "- For each ticker you recommend {intent}, provide: ticker, action (exactly '{intent}' or 'HOLD'), reason (short, plain English), entry_price (number), target_exit_price (number).\n"
+        "- If a stock does not support {intent}, set action to 'HOLD' and give a brief reason.\n"
+        "- Return ONLY a JSON array. No other text.\n"
+        "Format: [{\"ticker\":\"XXX.IS\",\"action\":\"BUY|SELL|HOLD\",\"reason\":\"...\",\"entry_price\":number,\"target_exit_price\":number}]\n\n"
+        "Data:\n" + "\n".join(lines)
+    ).replace("{intent}", intent)
 
     try:
         client = genai.Client(api_key=KEY_GEMINI)
         config = genai_types.GenerateContentConfig(
-            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
         )
         resp = client.models.generate_content(
             model=GEMINI_MODEL, contents=prompt, config=config
         )
-        text = getattr(resp, "text", "")
+        text = getattr(resp, "text", "") or ""
         block = extract_json_block(text)
         if not block:
-            print("Gemini JSON not found.")
             return None
-        return json.loads(block)
+        arr = json.loads(block)
+        if not isinstance(arr, list):
+            return None
+        return text, arr
     except Exception as e:
-        print(f"Gemini error: {e}")
+        print(f"Debate Round 1 (Gemini) error: {e}")
         return None
 
 
-def gemini_position_recommendations(
-    lines: List[str],
-) -> Optional[List[Dict[str, Any]]]:
-    if not KEY_GEMINI:
-        return None
-    prompt = (
-        "You are an assistant for BIST (Istanbul Stock Exchange) positions. For each line the user BOUGHT at bought_at; current price is current.\n"
-        "Use both: (1) the position data below (bought_at, current, chg_vs_buy, RSI, SMA20), and (2) your own search for recent news or context on these tickers.\n"
-        "Rules: Return only JSON. action = BUY, SELL, or HOLD. reason in English, at most 20 words.\n"
-        "Consider: gain/loss vs purchase, RSI, SMAs. If unsure, choose HOLD.\n\n"
-        'Produce a JSON array: [{"ticker":"XXX.IS","action":"BUY|SELL|HOLD","reason":"..."}, ...]\n\n'
-        "Position lines:\n" + "\n".join(lines)
-    )
-    try:
-        client = genai.Client(api_key=KEY_GEMINI)
-        config = genai_types.GenerateContentConfig(
-            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
-        )
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt, config=config
-        )
-        text = getattr(resp, "text", "")
-        block = extract_json_block(text)
-        if not block:
-            return None
-        return json.loads(block)
-    except Exception:
-        return None
-
-
-def fetch_research_summary(tickers: List[str]) -> Optional[str]:
-    if not KEY_GEMINI or not tickers:
-        return None
-    sample = tickers[:20] if len(tickers) > 20 else tickers
-    ticker_list = ", ".join(sample)
-    prompt = (
-        "Using web search, summarize in one short paragraph (under 150 words) any recent news, earnings, or market sentiment for BIST (Istanbul Stock Exchange) and these tickers: "
-        + ticker_list
-        + ". Be concise. English only."
-    )
-    try:
-        client = genai.Client(api_key=KEY_GEMINI)
-        config = genai_types.GenerateContentConfig(
-            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
-        )
-        resp = client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt, config=config
-        )
-        text = getattr(resp, "text", "").strip()
-        return text if text else None
-    except Exception:
-        return None
-
-
-def openai_review_json(
-    snapshots: List[StockSnapshot],
-    gemini_json: List[Dict[str, Any]],
-    research_summary: Optional[str] = None,
-) -> Optional[List[Dict[str, Any]]]:
+def debate_round2_openai_critique(
+    thesis_text: str, snapshots: List[StockSnapshot], intent: str
+) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Round 2: OpenAI acts as Risk Manager and criticizes the thesis."""
     if not KEY_OPENAI:
-        print("OPENAI_API_KEY is missing.")
         return None
-
-    compact_data = [
+    compact = [
         {
             "ticker": s.ticker,
             "price": s.price,
             "rsi": s.rsi14,
             "sma20": s.sma20,
             "sma50": s.sma50,
-            "r5": s.ret_5d_pct,
-            "r21": s.ret_21d_pct,
-            "baseline": s.baseline,
-            "purchase": s.purchase_price,
         }
         for s in snapshots
     ]
-
-    research_block = ""
-    if research_summary:
-        research_block = (
-            "\n\nRESEARCH (use this together with data and Gemini to form your view):\n"
-            + research_summary
-            + "\n\n"
-        )
-
-    msg = (
-        "You and Gemini both have access to research. Below: technical DATA, Gemini's recommendations (GEMINI), and optional RESEARCH.\n"
-        "Task: Consider DATA, Gemini's view, and RESEARCH. For each ticker, decide the final BUY/SELL/HOLD (you may agree or disagree with Gemini). Keep reason under 20 words, in English.\n"
-        "Return only a JSON array, no other text. action must be exactly BUY, SELL, or HOLD.\n\n"
-        f"DATA={json.dumps(compact_data, ensure_ascii=False)}\n\n"
-        f"GEMINI={json.dumps(gemini_json, ensure_ascii=False)}"
-        + research_block
-    )
+    prompt = (
+        f"You are a strict Risk Manager. Gemini has proposed a {intent} thesis. Your job is to criticize it: bear market scenarios, technical traps, overbought/oversold false signals.\n"
+        "Rules:\n"
+        "- Respond ONLY in English. Use plain language.\n"
+        "- For each ticker, output: ticker, critique (short), verdict_after_critique: exactly one of 'STRONG BUY', 'STRONG SELL', 'HOLD'. If you disagree with {intent}, use HOLD or the opposite.\n"
+        "- Return ONLY a JSON array. No other text.\n"
+        "Format: [{\"ticker\":\"XXX.IS\",\"critique\":\"...\",\"verdict_after_critique\":\"STRONG BUY|STRONG SELL|HOLD\"}]\n\n"
+        f"Technical data: {json.dumps(compact)}\n\n"
+        f"Gemini thesis (Round 1):\n{thesis_text}"
+    ).replace("{intent}", intent)
 
     try:
         client = OpenAI(api_key=KEY_OPENAI)
         res = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Output only JSON. action=BUY|SELL|HOLD; reason <= 20 words, in English.",
-                },
-                {"role": "user", "content": msg},
+                {"role": "system", "content": SYSTEM_ENGLISH + " Output only JSON array."},
+                {"role": "user", "content": prompt},
             ],
             temperature=0.2,
         )
         text = res.choices[0].message.content or ""
         block = extract_json_block(text)
         if not block:
-            print("OpenAI JSON not found.")
             return None
-        return json.loads(block)
+        arr = json.loads(block)
+        if not isinstance(arr, list):
+            return None
+        return text, arr
     except Exception as e:
-        print(f"OpenAI error: {e}")
+        print(f"Debate Round 2 (OpenAI) error: {e}")
         return None
 
 
-def openai_review_position_json(
+def debate_round3_gemini_reply(
+    thesis_text: str,
+    critique_text: str,
     snapshots: List[StockSnapshot],
-    gemini_json: List[Dict[str, Any]],
-    research_summary: Optional[str] = None,
+    intent: str,
+) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    """Round 3: Gemini replies to critique and gives final stance (STRONG BUY / STRONG SELL / HOLD)."""
+    if not KEY_GEMINI:
+        return None
+    lines = [format_snapshot_line(s) for s in snapshots]
+    prompt = (
+        f"Your {intent} thesis was criticized by a Risk Manager. Reply to the critique and give your FINAL stance per ticker.\n"
+        "Rules:\n"
+        "- Respond ONLY in English. Plain language.\n"
+        "- For each ticker set final_action to exactly one of: 'STRONG BUY', 'STRONG SELL', 'HOLD'. Only use STRONG BUY or STRONG SELL if you remain confident after the critique.\n"
+        "- Include: ticker, reply (short), final_action, reason, entry_price, target_exit_price.\n"
+        "- Return ONLY a JSON array.\n"
+        "Format: [{\"ticker\":\"XXX.IS\",\"reply\":\"...\",\"final_action\":\"STRONG BUY|STRONG SELL|HOLD\",\"reason\":\"...\",\"entry_price\":number,\"target_exit_price\":number}]\n\n"
+        "Data:\n" + "\n".join(lines) + "\n\n--- Your thesis (Round 1) ---\n" + thesis_text + "\n\n--- Risk Manager critique (Round 2) ---\n" + critique_text
+    ).replace("{intent}", intent)
+
+    try:
+        client = genai.Client(api_key=KEY_GEMINI)
+        config = genai_types.GenerateContentConfig(
+            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+        )
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt, config=config
+        )
+        text = getattr(resp, "text", "") or ""
+        block = extract_json_block(text)
+        if not block:
+            return None
+        arr = json.loads(block)
+        if not isinstance(arr, list):
+            return None
+        return text, arr
+    except Exception as e:
+        print(f"Debate Round 3 (Gemini) error: {e}")
+        return None
+
+
+def debate_final_openai_verdict(
+    round1_text: str,
+    round2_text: str,
+    round3_text: str,
+    snapshots: List[StockSnapshot],
 ) -> Optional[List[Dict[str, Any]]]:
+    """Final: OpenAI summarizes the debate and outputs FINAL VERDICT per ticker."""
     if not KEY_OPENAI:
         return None
-    compact_data = [
-        {
-            "ticker": s.ticker,
-            "bought_at": s.purchase_price,
-            "current": s.price,
-            "rsi": s.rsi14,
-        }
-        for s in snapshots
-    ]
-    research_block = ""
-    if research_summary:
-        research_block = (
-            "\n\nRESEARCH (use with data and Gemini):\n" + research_summary + "\n\n"
-        )
-    msg = (
-        "Consider position data, Gemini's view, and RESEARCH below. For each ticker (user bought at bought_at, current price current), decide final BUY/SELL/HOLD. reason in English, max 20 words. Output only JSON.\n\n"
-        f"DATA={json.dumps(compact_data, ensure_ascii=False)}\n\n"
-        f"GEMINI={json.dumps(gemini_json, ensure_ascii=False)}"
-        + research_block
+    compact = [{"ticker": s.ticker, "price": s.price} for s in snapshots]
+    prompt = (
+        "Summarize the debate and give your FINAL VERDICT for each ticker. Only STRONG BUY or STRONG SELL if you agree with the final thesis; otherwise HOLD.\n"
+        "Rules:\n"
+        "- Respond ONLY in English. Plain language.\n"
+        "- For each ticker output: ticker, verdict (exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'), entry_price, target_exit_price, summary_reason (plain English, no jargon).\n"
+        "- Return ONLY a JSON array. No other text.\n"
+        "Format: [{\"ticker\":\"XXX.IS\",\"verdict\":\"STRONG BUY|STRONG SELL|HOLD\",\"entry_price\":number,\"target_exit_price\":number,\"summary_reason\":\"...\"}]\n\n"
+        f"Data: {json.dumps(compact)}\n\n--- Round 1 (Gemini thesis) ---\n{round1_text}\n\n--- Round 2 (Risk Manager critique) ---\n{round2_text}\n\n--- Round 3 (Gemini reply) ---\n{round3_text}"
     )
+
     try:
         client = OpenAI(api_key=KEY_OPENAI)
         res = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": "Output only JSON. action=BUY|SELL|HOLD; reason <= 20 words, in English.",
-                },
-                {"role": "user", "content": msg},
+                {"role": "system", "content": SYSTEM_ENGLISH + " Output only JSON array."},
+                {"role": "user", "content": prompt},
             ],
             temperature=0.2,
         )
@@ -508,92 +483,343 @@ def openai_review_position_json(
         block = extract_json_block(text)
         if not block:
             return None
-        return json.loads(block)
-    except Exception:
+        arr = json.loads(block)
+        if not isinstance(arr, list):
+            return None
+        return arr
+    except Exception as e:
+        print(f"Debate Final (OpenAI) error: {e}")
         return None
 
 
-def send_email(subject: str, body: str) -> None:
+def run_debate_loop(
+    snapshots: List[StockSnapshot], intent: str
+) -> List[Dict[str, Any]]:
+    """
+    Run full debate (Gemini -> OpenAI -> Gemini -> OpenAI). Return only items where
+    BOTH models agree on STRONG BUY or STRONG SELL; filter out HOLD or disagreement.
+    """
+    if not snapshots:
+        return []
+
+    r1 = debate_round1_gemini_thesis(snapshots, intent)
+    if not r1:
+        return []
+    thesis_text, thesis_arr = r1
+
+    r2 = debate_round2_openai_critique(thesis_text, snapshots, intent)
+    if not r2:
+        return []
+    critique_text, critique_arr = r2
+
+    r3 = debate_round3_gemini_reply(
+        thesis_text, critique_text, snapshots, intent
+    )
+    if not r3:
+        return []
+    reply_text, reply_arr = r3
+
+    final_arr = debate_final_openai_verdict(
+        thesis_text, critique_text, reply_text, snapshots
+    )
+    if not final_arr:
+        return []
+
+    # Build maps by ticker
+    reply_by_ticker = {}
+    for r in reply_arr:
+        t = (r.get("ticker") or "").strip()
+        if t:
+            reply_by_ticker[t] = r
+    final_by_ticker = {}
+    for f in final_arr:
+        t = (f.get("ticker") or "").strip()
+        if t:
+            final_by_ticker[t] = f
+
+    # Only report when BOTH say STRONG BUY or BOTH say STRONG SELL (same verdict)
+    approved: List[Dict[str, Any]] = []
+    for s in snapshots:
+        t = s.ticker
+        gemini_verdict = normalize_verdict(
+            (reply_by_ticker.get(t) or {}).get("final_action", "HOLD")
+        )
+        openai_verdict = normalize_verdict(
+            (final_by_ticker.get(t) or {}).get("verdict", "HOLD")
+        )
+        if gemini_verdict not in STRONG_VERDICTS or openai_verdict not in STRONG_VERDICTS:
+            continue
+        if gemini_verdict != openai_verdict:
+            continue
+        rec = final_by_ticker.get(t) or reply_by_ticker.get(t) or {}
+        entry = safe_float(rec.get("entry_price")) or s.price
+        target = safe_float(rec.get("target_exit_price")) or (s.target_high or s.price * 1.1)
+        approved.append({
+            "ticker": t,
+            "verdict": gemini_verdict,
+            "entry_price": round(entry, 2),
+            "target_exit_price": round(target, 2),
+            "reason": (rec.get("summary_reason") or rec.get("reason") or "").strip() or "Agreed after debate.",
+            "current_price": s.price,
+        })
+    return approved
+
+
+def send_email(subject: str, body: str) -> bool:
     if not (MAIL_USER and MAIL_PASS and MAIL_RCVR):
         print("Mail env variables missing (EMAIL_USER/EMAIL_PASS/RECEIVER_EMAIL).")
-        return
-
+        return False
     msg = MIMEMultipart()
     msg["Subject"] = subject
     msg["From"] = MAIL_USER
     msg["To"] = MAIL_RCVR
     msg.attach(MIMEText(body, "plain", "utf-8"))
-
     try:
         with smtplib.SMTP("smtp.gmail.com", 587) as s:
             s.starttls()
             s.login(MAIL_USER, MAIL_PASS)
             s.send_message(msg)
+        return True
     except Exception as e:
         print(f"Mail error: {e}")
+        return False
 
 
-def format_daily_email(
-    recs: List[Dict[str, Any]],
-    position_recs: Optional[List[Dict[str, Any]]] = None,
+def format_opportunity_email_plain_english(
+    opportunities: List[Dict[str, Any]], title: str
 ) -> Tuple[str, str]:
+    """Mentorship-style email: plain English, Entry Price, Target Exit Price."""
     today = datetime.now().strftime("%d-%m-%Y")
-    lines: List[str] = []
-
-    for r in recs:
-        t = r.get("ticker", "")
-        a = normalize_action(str(r.get("action", "HOLD")))
-        reason = str(r.get("reason", "")).strip()
-        reason_words = reason.split()
-        if len(reason_words) > 20:
-            reason = " ".join(reason_words[:20])
-        lines.append(f"{t}: {a} — {reason}")
-
-    if position_recs:
+    lines = [f"{title} — {today}", ""]
+    for o in opportunities:
+        ticker = o.get("ticker", "")
+        verdict = o.get("verdict", "")
+        entry = o.get("entry_price")
+        target = o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        lines.append(f"• {ticker}: {verdict}")
+        lines.append(f"  Entry price: {entry_s}")
+        lines.append(f"  Target exit price: {target_s}")
+        lines.append(f"  Reason: {reason}")
         lines.append("")
-        lines.append("--- My positions ---")
-        lines.append("")
-        for r in position_recs:
-            t = r.get("ticker", "")
-            a = normalize_action(str(r.get("action", "HOLD")))
-            reason = str(r.get("reason", "")).strip()
-            reason_words = reason.split()
-            if len(reason_words) > 20:
-                reason = " ".join(reason_words[:20])
-            lines.append(f"{t}: {a} — {reason}")
-
-    lines.append("")
-    lines.append(
-        "Note: This output is not investment advice; for informational purposes only."
-    )
-
-    subject = f"BIST Daily Recommendation (BUY/SELL/HOLD) - {today}"
+    lines.append("This is not investment advice; for informational purposes only.")
+    subject = f"{title} — {today}"
     return subject, "\n".join(lines)
 
+
+# ---------- Scenario A: Opportunity Hunter (weekdays 12:15) ----------
+
+def run_opportunity_hunter() -> None:
+    """Run BUY scan for tickers list and SELL scan for target_prices; send email only if debate approves any."""
+    config = read_json(CONFIG_PATH)
+    tickers_watch = list(config.get("tickers", []))
+    target_prices = config.get("target_prices", {})
+    owned_tickers = list(target_prices.keys()) if isinstance(target_prices, dict) else []
+
+    all_opportunities: List[Dict[str, Any]] = []
+
+    # BUY opportunities for watchlist
+    if tickers_watch:
+        try:
+            snap_buy = build_snapshots(
+                tickers=tickers_watch,
+                target_prices=config.get("target_prices", {}),
+                period="3mo",
+            )
+            if snap_buy:
+                approved_buy = run_debate_loop(snap_buy, "BUY")
+                all_opportunities.extend(approved_buy)
+        except Exception as e:
+            print(f"Opportunity Hunter (BUY) error: {e}")
+
+    # SELL opportunities for owned positions
+    if owned_tickers:
+        try:
+            snap_sell = build_snapshots(
+                tickers=owned_tickers,
+                target_prices=target_prices,
+                period="3mo",
+            )
+            if snap_sell:
+                approved_sell = run_debate_loop(snap_sell, "SELL")
+                all_opportunities.extend(approved_sell)
+        except Exception as e:
+            print(f"Opportunity Hunter (SELL) error: {e}")
+
+    if not all_opportunities:
+        return  # Do not send email when no approved opportunities
+
+    subject, body = format_opportunity_email_plain_english(
+        all_opportunities, "Stock Opportunity Hunter — Approved Signals"
+    )
+    send_email(subject, body)
+
+
+# ---------- Scenario B: Drop Detector (weekdays 10–17, hourly) ----------
+
+def get_yearly_metrics(ticker: str) -> Optional[Dict[str, float]]:
+    """Fetch 1-year data; return price, sma252, high_52w. None on error."""
+    try:
+        df = download_history([ticker], period="1y")
+        if df is None or df.empty:
+            return None
+        close = get_close_series(df, ticker)
+        if close is None or len(close) < 2:
+            return None
+        price = float(close.iloc[-1])
+        sma252 = (
+            float(close.rolling(252).mean().iloc[-1])
+            if len(close) >= 252
+            else float(close.mean())
+        )
+        high_52w = float(close.max())
+        return {"price": price, "sma252": sma252, "high_52w": high_52w}
+    except Exception as e:
+        print(f"Drop Detector data error for {ticker}: {e}")
+        return None
+
+
+def run_drop_detector() -> None:
+    """Check all tickers from config for 20% below SMA252 or 30% below 52w high; manage alert_states.json; send Urgent Alert email when needed."""
+    config = read_json(CONFIG_PATH)
+    tickers = list(config.get("tickers", []))
+    target_prices = config.get("target_prices", {})
+    if isinstance(target_prices, dict):
+        for t in target_prices:
+            if t not in tickers:
+                tickers.append(t)
+    if not tickers:
+        return
+
+    states = read_json(ALERT_STATES_PATH)
+    alerts_sent_this_run: List[Dict[str, Any]] = []
+
+    for ticker in tickers:
+        try:
+            m = get_yearly_metrics(ticker)
+            if not m:
+                continue
+            price = m["price"]
+            sma252 = m["sma252"]
+            high_52w = m["high_52w"]
+            below_sma20 = sma252 > 0 and price <= sma252 * 0.80
+            below_high30 = high_52w > 0 and price <= high_52w * 0.70
+            if not (below_sma20 or below_high30):
+                # Reset state when price recovered above thresholds
+                if ticker in states:
+                    st = states[ticker]
+                    last_price = safe_float(st.get("last_alert_price"))
+                    if last_price and price >= max(sma252 * 0.81, high_52w * 0.71):
+                        st["sent"] = False
+                continue
+
+            st = states.get(ticker, {})
+            already_sent = st.get("sent", False)
+            last_alert_price = safe_float(st.get("last_alert_price"))
+
+            # Reset if new dip (5% lower than last alert)
+            if last_alert_price is not None and price <= last_alert_price * 0.95:
+                already_sent = False
+
+            if already_sent:
+                continue
+
+            alerts_sent_this_run.append({
+                "ticker": ticker,
+                "price": price,
+                "sma252": sma252,
+                "high_52w": high_52w,
+                "below_sma20_pct": below_sma20,
+                "below_high30_pct": below_high30,
+            })
+            states[ticker] = {
+                "sent": True,
+                "last_alert_price": price,
+                "last_alert_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        except Exception as e:
+            print(f"Drop Detector ticker {ticker} error: {e}")
+            continue
+
+    write_json(ALERT_STATES_PATH, states)
+
+    if not alerts_sent_this_run:
+        return
+
+    lines = [
+        "Urgent Opportunity / Alert — Price drop detected",
+        "",
+        "The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).",
+        "",
+    ]
+    for a in alerts_sent_this_run:
+        t = a.get("ticker", "")
+        p = a.get("price")
+        lines.append(f"• {t}: current price {p:.2f}")
+        if a.get("below_sma20_pct"):
+            lines.append("  — Price is 20% or more below the 1-year average.")
+        if a.get("below_high30_pct"):
+            lines.append("  — Price is 30% or more below the 52-week high.")
+        lines.append("")
+    lines.append("This is not investment advice; for informational purposes only.")
+    subject = "Urgent Opportunity / Alert — Drop detected"
+    send_email(subject, "\n".join(lines))
+
+
+# ---------- Scheduler ----------
+
+def run_scheduler() -> None:
+    """Run scheduled jobs: Opportunity Hunter weekdays 12:15, Drop Detector weekdays 10–17 every hour."""
+    schedule.clear()
+    schedule.every().monday.at("12:15").do(run_opportunity_hunter)
+    schedule.every().tuesday.at("12:15").do(run_opportunity_hunter)
+    schedule.every().wednesday.at("12:15").do(run_opportunity_hunter)
+    schedule.every().thursday.at("12:15").do(run_opportunity_hunter)
+    schedule.every().friday.at("12:15").do(run_opportunity_hunter)
+
+    for hour in range(10, 18):  # 10:00 to 17:00
+        schedule.every().monday.at(f"{hour:02d}:00").do(run_drop_detector)
+        schedule.every().tuesday.at(f"{hour:02d}:00").do(run_drop_detector)
+        schedule.every().wednesday.at(f"{hour:02d}:00").do(run_drop_detector)
+        schedule.every().thursday.at(f"{hour:02d}:00").do(run_drop_detector)
+        schedule.every().friday.at(f"{hour:02d}:00").do(run_drop_detector)
+
+    print("Scheduler started. Opportunity Hunter: weekdays 12:15. Drop Detector: weekdays 10:00–17:00 hourly.")
+    while True:
+        try:
+            schedule.run_pending()
+        except Exception as e:
+            print(f"Scheduler job error: {e}")
+        time.sleep(60)
+
+
+# ---------- Legacy: track only & daily analysis (kept for compatibility) ----------
 
 def run_track_only(config: Dict[str, Any]) -> None:
     target_prices = config.get("target_prices", {})
     if not target_prices:
         print("target_prices is empty.")
         return
-
     tickers = list(target_prices.keys())
-    snapshots = build_snapshots(
-        tickers=tickers, target_prices=target_prices, period="1mo"
-    )
-
+    try:
+        snapshots = build_snapshots(
+            tickers=tickers, target_prices=target_prices, period="1mo"
+        )
+    except Exception as e:
+        print(f"Track only error: {e}")
+        return
     states = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "targets": {},
     }
-
     for s in snapshots:
         status = "IN_RANGE"
         if s.target_low is not None and s.price <= s.target_low:
             status = "BELOW_LOW"
         if s.target_high is not None and s.price >= s.target_high:
             status = "ABOVE_HIGH"
-
         states["targets"][s.ticker] = {
             "price": s.price,
             "status": status,
@@ -601,112 +827,85 @@ def run_track_only(config: Dict[str, Any]) -> None:
             "low": s.target_low,
             "high": s.target_high,
         }
-
-    write_json("stock_states.json", states)
+    write_json(STOCK_STATES_PATH, states)
     print("stock_states.json updated.")
 
 
 def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
+    """Legacy daily analysis: runs debate for all tickers and positions, saves recommendations and sends one email (only STRONG BUY/SELL after debate)."""
     target_prices = config.get("target_prices", {})
     tickers = load_universe(config, universe=universe)
-
     if not tickers:
         print("No ticker list found (config or BIST source).")
         return
-
-    snapshots = build_snapshots(
-        tickers=tickers, target_prices=target_prices, period="3mo"
-    )
+    try:
+        snapshots = build_snapshots(
+            tickers=tickers, target_prices=target_prices, period="3mo"
+        )
+    except Exception as e:
+        print(f"Daily analysis data error: {e}")
+        return
     if not snapshots:
         print("Market data could not be fetched.")
         return
 
-    lines = [format_snapshot_line(s) for s in snapshots]
+    # Single debate for BUY opportunities on full universe; then filter owned for SELL
+    approved_buy = run_debate_loop(snapshots, "BUY")
+    owned = [s for s in snapshots if s.purchase_price is not None]
+    approved_sell = run_debate_loop(owned, "SELL") if owned else []
 
-    gemini = gemini_json_recommendations(lines)
-    if not gemini:
-        print("No Gemini output; continuing with baseline.")
-        gemini = [
-            {
-                "ticker": s.ticker,
-                "action": s.baseline,
-                "reason": "Technical view / target band",
-            }
-            for s in snapshots
-        ]
-
-    research_summary = fetch_research_summary(tickers)
-    final = openai_review_json(snapshots, gemini, research_summary=research_summary) or gemini
-    fill_missing_tickers(final, snapshots)
-    for r in final:
-        r["action"] = normalize_action(str(r.get("action", "HOLD")))
-
-    position_snapshots = [s for s in snapshots if s.purchase_price is not None]
-    position_final: Optional[List[Dict[str, Any]]] = None
-    if position_snapshots:
-        position_tickers = [s.ticker for s in position_snapshots]
-        position_research = fetch_research_summary(position_tickers) or research_summary
-        position_lines = [format_position_line(s) for s in position_snapshots]
-        position_gemini = gemini_position_recommendations(position_lines)
-        if position_gemini:
-            position_final = (
-                openai_review_position_json(
-                    position_snapshots, position_gemini, research_summary=position_research
-                )
-                or position_gemini
-            )
-        else:
-            position_final = [
-                {
-                    "ticker": s.ticker,
-                    "action": s.baseline,
-                    "reason": "Technical view vs purchase price.",
-                }
-                for s in position_snapshots
-            ]
-        fill_missing_tickers(position_final, position_snapshots)
-        for r in position_final:
-            r["action"] = normalize_action(str(r.get("action", "HOLD")))
-
+    all_recs = approved_buy + approved_sell
     write_json(
         "daily_recommendations.json",
         {
             "updated_at": datetime.now().isoformat(timespec="seconds"),
             "gemini_model": GEMINI_MODEL,
             "openai_model": OPENAI_MODEL,
-            "recommendations": final,
-            "position_recommendations": position_final,
+            "recommendations": all_recs,
         },
     )
-
-    subject, body = format_daily_email(final, position_recs=position_final)
-    send_email(subject, body)
+    if all_recs:
+        subject, body = format_opportunity_email_plain_english(
+            all_recs, "Daily Recommendation — Approved Signals"
+        )
+        send_email(subject, body)
+    else:
+        print("No STRONG BUY/STRONG SELL agreements; no email sent.")
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="BIST tracker + daily BUY/SELL/HOLD recommender"
+        description="Stock Market Watcher — AI debate-based BUY/SELL + Scheduler"
     )
     p.add_argument(
         "mode",
         nargs="?",
         default="track",
-        choices=["track", "daily_analysis"],
-        help="track: update target_prices state file only (no email). daily_analysis: single email, all tickers.",
+        choices=["track", "daily_analysis", "scheduler", "opportunity_hunter", "drop_detector"],
+        help="track: update stock_states only. daily_analysis: one-shot debate + email. scheduler: run daemon. opportunity_hunter: one-shot. drop_detector: one-shot.",
     )
     p.add_argument(
         "--universe",
         default="config",
         choices=["config", "bist", "auto"],
-        help="config: config.json tickers; bist: Borsa Istanbul CSV; auto: use BIST if config empty.",
+        help="Universe for daily_analysis: config, bist, or auto.",
     )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    config = read_json("config.json")
+    config = read_json(CONFIG_PATH)
 
+    if args.mode == "scheduler":
+        run_scheduler()
+        return
+    if args.mode == "opportunity_hunter":
+        run_opportunity_hunter()
+        return
+    if args.mode == "drop_detector":
+        run_drop_detector()
+        return
     if args.mode == "track":
         run_track_only(config)
     else:
