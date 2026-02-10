@@ -5,6 +5,7 @@ Scheduler: Opportunity Hunter (weekdays 12:15) + Drop Detector (weekdays 10–17
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -285,14 +286,9 @@ def build_snapshots(
             r21 = pct_return(close, 21)
             tp = target_prices.get(t, {}) if isinstance(target_prices, dict) else {}
             purchase_price = safe_float(tp.get("purchase_price"))
-            # Auto low/high from purchase_price ±5% when not set in config
-            low = safe_float(tp.get("low"))
-            high = safe_float(tp.get("high"))
-            if purchase_price is not None:
-                if low is None:
-                    low = round(purchase_price * 0.95, 2)
-                if high is None:
-                    high = round(purchase_price * 1.05, 2)
+            # Low/high only from purchase_price: 95% and 105% (no config low/high)
+            low = round(purchase_price * 0.95, 2) if purchase_price is not None else None
+            high = round(purchase_price * 1.05, 2) if purchase_price is not None else None
             base = baseline_action(price, sma20, sma50, rsi14)
             snapshots.append(
                 StockSnapshot(
@@ -307,8 +303,8 @@ def build_snapshots(
                     purchase_price=(
                         None if purchase_price is None else round(purchase_price, 2)
                     ),
-                    target_low=None if low is None else round(low, 2),
-                    target_high=None if high is None else round(high, 2),
+                    target_low=low,
+                    target_high=high,
                 )
             )
         except Exception as e:
@@ -571,7 +567,7 @@ def run_debate_loop(
     return approved
 
 
-def send_email(subject: str, body: str) -> bool:
+def send_email(subject: str, body: str, body_subtype: str = "plain") -> bool:
     if not (MAIL_USER and MAIL_PASS and MAIL_RCVR):
         print("Mail env variables missing (EMAIL_USER/EMAIL_PASS/RECEIVER_EMAIL).")
         return False
@@ -579,7 +575,7 @@ def send_email(subject: str, body: str) -> bool:
     msg["Subject"] = subject
     msg["From"] = MAIL_USER
     msg["To"] = MAIL_RCVR
-    msg.attach(MIMEText(body, "plain", "utf-8"))
+    msg.attach(MIMEText(body, body_subtype, "utf-8"))
     try:
         with smtplib.SMTP("smtp.gmail.com", 587) as s:
             s.starttls()
@@ -596,14 +592,14 @@ def format_opportunity_email_plain_english(
     title: str,
     target_prices: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
-    """Mentorship-style email: plain English, Entry Price, Target Exit Price. Subject is always 'Daily Recommendation - Date'. Main list excludes target_prices tickers; those are listed at the end with Your purchase price. Strong Sell then Strong Buy, each sorted alphabetically."""
+    """Build HTML email body: bold numbers and tickers, bold labels (Entry price, etc.), MY POSITIONS bold with 3 blank lines above. No Strong Sell/Buy count line."""
     today = datetime.now().strftime("%d-%m-%Y")
     subject = f"Daily Recommendation - {today}"
     target_prices = target_prices or {}
+    parts: List[str] = []
 
     # Main list: only tickers NOT in target_prices (watchlist opportunities)
     main_opps = [o for o in opportunities if o.get("ticker", "") not in target_prices]
-    # Owned positions: tickers IN target_prices (listed at the end)
     owned_opps = [o for o in opportunities if o.get("ticker", "") in target_prices]
 
     strong_sell_main = sorted(
@@ -614,12 +610,10 @@ def format_opportunity_email_plain_english(
         [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
         key=lambda o: (o.get("ticker") or ""),
     )
-    n_sell, n_buy = len(strong_sell_main), len(strong_buy_main)
 
-    lines = [
-        f"Strong Sell: {n_sell}  |  Strong Buy: {n_buy}",
-        "",
-    ]
+    def line_br() -> None:
+        parts.append("<br>")
+
     num = 1
     for o in strong_sell_main:
         ticker = o.get("ticker", "")
@@ -628,10 +622,13 @@ def format_opportunity_email_plain_english(
         reason = (o.get("reason") or "").strip() or "No additional comment."
         entry_s = f"{entry:.2f}" if entry is not None else "N/A"
         target_s = f"{target:.2f}" if target is not None else "N/A"
-        lines.append(f"{num}. {ticker}: STRONG SELL")
-        lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
-        lines.append(f"   Reason: {reason}")
-        lines.append("")
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
         num += 1
     for o in strong_buy_main:
         ticker = o.get("ticker", "")
@@ -640,14 +637,18 @@ def format_opportunity_email_plain_english(
         reason = (o.get("reason") or "").strip() or "No additional comment."
         entry_s = f"{entry:.2f}" if entry is not None else "N/A"
         target_s = f"{target:.2f}" if target is not None else "N/A"
-        lines.append(f"{num}. {ticker}: STRONG BUY")
-        lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
-        lines.append(f"   Reason: {reason}")
-        lines.append("")
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
         num += 1
-    lines.append("This is not investment advice; for informational purposes only.")
+    parts.append("This is not investment advice; for informational purposes only.")
+    line_br()
 
-    # At the end: owned positions (target_prices), STRONG SELL then STRONG BUY, alphabetically; show Your purchase price above Entry price
+    # Owned positions: MY POSITIONS bold, 3 blank lines above
     if owned_opps and target_prices:
         strong_sell_owned = sorted(
             [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
@@ -657,9 +658,12 @@ def format_opportunity_email_plain_english(
             [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
             key=lambda o: (o.get("ticker") or ""),
         )
-        lines.append("")
-        lines.append("MY POSITIONS")
-        lines.append("")
+        line_br()
+        line_br()
+        line_br()
+        parts.append("<b>MY POSITIONS</b>")
+        line_br()
+        line_br()
         num_owned = 1
         for o in strong_sell_owned:
             ticker = o.get("ticker", "")
@@ -671,11 +675,15 @@ def format_opportunity_email_plain_english(
             purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            lines.append(f"{num_owned}. {ticker}: STRONG SELL")
-            lines.append(f"   Your purchase price: {purchase_s}")
-            lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
-            lines.append(f"   Reason: {reason}")
-            lines.append("")
+            parts.append(f'<b>{num_owned}. {ticker}</b>: STRONG SELL')
+            line_br()
+            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
             num_owned += 1
         for o in strong_buy_owned:
             ticker = o.get("ticker", "")
@@ -687,14 +695,18 @@ def format_opportunity_email_plain_english(
             purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            lines.append(f"{num_owned}. {ticker}: STRONG BUY")
-            lines.append(f"   Your purchase price: {purchase_s}")
-            lines.append(f"   Entry price: {entry_s}  |  Target exit price: {target_s}")
-            lines.append(f"   Reason: {reason}")
-            lines.append("")
+            parts.append(f'<b>{num_owned}. {ticker}</b>: STRONG BUY')
+            line_br()
+            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
             num_owned += 1
 
-    return subject, "\n".join(lines)
+    return subject, "<html><body>" + "".join(parts) + "</body></html>"
 
 
 # ---------- Scenario A: Opportunity Hunter (weekdays 12:15) ----------
@@ -744,7 +756,7 @@ def run_opportunity_hunter() -> None:
         "Stock Opportunity Hunter — Approved Signals",
         target_prices=target_prices,
     )
-    send_email(subject, body)
+    send_email(subject, body, body_subtype="html")
 
 
 # ---------- Scenario B: Drop Detector (weekdays 10–17, hourly) ----------
@@ -1004,7 +1016,7 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
             "Daily Recommendation — Approved Signals",
             target_prices=target_prices,
         )
-        send_email(subject, body)
+        send_email(subject, body, body_subtype="html")
     else:
         print("No STRONG BUY/STRONG SELL agreements; no email sent.")
 
