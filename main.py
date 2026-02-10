@@ -645,8 +645,6 @@ def format_opportunity_email_plain_english(
         line_br()
         line_br()
         num += 1
-    parts.append("This is not investment advice; for informational purposes only.")
-    line_br()
 
     # Owned positions: MY POSITIONS bold, 3 blank lines above
     if owned_opps and target_prices:
@@ -706,6 +704,10 @@ def format_opportunity_email_plain_english(
             line_br()
             num_owned += 1
 
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>This is not investment advice; for informational purposes only.</b>")
     return subject, "<html><body>" + "".join(parts) + "</body></html>"
 
 
@@ -913,7 +915,10 @@ def run_drop_detector() -> None:
                 parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
             parts.append("<br>")
             parts.append("<br>")
-    parts.append("This is not investment advice; for informational purposes only.")
+    parts.append("<br>")
+    parts.append("<br>")
+    parts.append("<br>")
+    parts.append("<b>This is not investment advice; for informational purposes only.</b>")
     body = "<html><body>" + "".join(parts) + "</body></html>"
     send_email(subject, body, body_subtype="html")
 
