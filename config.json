@@ -99,17 +99,14 @@
         "ZOREN.IS"
     ],
     "target_prices": {
-        "KONTR.IS": {
-            "purchase_price": 9.75
-        },
-        "SASA.IS": {
-            "purchase_price": 2.40
-        },
         "ALTNY.IS": {
             "purchase_price": 16.75
         },
         "PATEK.IS": {
             "purchase_price": 20.78
+        },
+        "TUREX.IS": {
+            "purchase_price": 7.69
         }
     }
 }
