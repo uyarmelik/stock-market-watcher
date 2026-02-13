@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-02-13T11:27:13",
+  "updated_at": "2026-02-13T12:28:14",
   "targets": {
     "ALTNY.IS": {
-      "price": 15.82,
-      "status": "BELOW_LOW",
+      "price": 15.92,
+      "status": "IN_RANGE",
       "purchase_price": 16.75,
       "low": 15.91,
       "high": 17.59
@@ -16,8 +16,8 @@
       "high": 21.82
     },
     "TUREX.IS": {
-      "price": 8.07,
-      "status": "ABOVE_HIGH",
+      "price": 7.99,
+      "status": "IN_RANGE",
       "purchase_price": 7.69,
       "low": 7.31,
       "high": 8.07
