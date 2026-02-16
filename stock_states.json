@@ -1,23 +1,23 @@
 {
-  "updated_at": "2026-02-13T14:31:02",
+  "updated_at": "2026-02-16T07:38:03",
   "targets": {
     "ALTNY.IS": {
-      "price": 15.94,
+      "price": 16.24,
       "status": "IN_RANGE",
       "purchase_price": 16.75,
       "low": 15.91,
       "high": 17.59
     },
     "PATEK.IS": {
-      "price": 20.44,
+      "price": 20.5,
       "status": "IN_RANGE",
       "purchase_price": 20.78,
       "low": 19.74,
       "high": 21.82
     },
     "TUREX.IS": {
-      "price": 8.06,
-      "status": "IN_RANGE",
+      "price": 8.28,
+      "status": "ABOVE_HIGH",
       "purchase_price": 7.69,
       "low": 7.31,
       "high": 8.07
