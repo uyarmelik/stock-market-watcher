@@ -323,19 +323,19 @@ SYSTEM_ENGLISH = (
 def debate_round1_gemini_thesis(
     snapshots: List[StockSnapshot], intent: str
 ) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
-    """Round 1: Gemini presents BUY or SELL thesis. intent is 'BUY' or 'SELL'."""
+    """Round 1: Gemini presents BUY or SELL thesis with strict technical criteria."""
     if not KEY_GEMINI or not snapshots:
         return None
     lines = [format_snapshot_line(s) for s in snapshots]
     prompt = (
-        f"You are a technical analyst for BIST (Istanbul Stock Exchange). Your task is to present a clear {intent} thesis ONLY for stocks that support a {intent}.\n"
+        "You are a senior technical analyst for BIST (Istanbul Stock Exchange). Use ADVANCED technical analysis: RSI levels (overbought >70, oversold <30, neutral 40-60), price vs SMA20/SMA50 (trend), 5d/21d returns (momentum). Be selective: recommend {intent} ONLY when the technical picture clearly supports it.\n"
         "Rules:\n"
-        "- Respond ONLY in English. Use plain language (e.g. 'Price is below average, buying opportunity' not 'RSI oversold').\n"
-        "- For each ticker you recommend {intent}, provide: ticker, action (exactly '{intent}' or 'HOLD'), reason (short, plain English), entry_price (number), target_exit_price (number).\n"
-        "- If a stock does not support {intent}, set action to 'HOLD' and give a brief reason.\n"
+        "- For each ticker you must justify with technicals: e.g. 'Price above SMA20 and SMA50, RSI 55-65, positive 21d return' for BUY; or 'Price below both SMAs, RSI below 40' for SELL. Use plain English for the reader but base the conclusion on the numbers.\n"
+        "- Output: ticker, action (exactly '{intent}' or 'HOLD'), reason (short, technically grounded), entry_price (number), target_exit_price (number).\n"
+        "- If RSI, SMAs or returns do not clearly support {intent}, set action to 'HOLD'. Prefer HOLD when in doubt.\n"
         "- Return ONLY a JSON array. No other text.\n"
         "Format: [{\"ticker\":\"XXX.IS\",\"action\":\"BUY|SELL|HOLD\",\"reason\":\"...\",\"entry_price\":number,\"target_exit_price\":number}]\n\n"
-        "Data:\n" + "\n".join(lines)
+        "Data (P=price, RSI, SMA20, SMA50, R5=5d return %, R21=21d return %, BASE=heuristic):\n" + "\n".join(lines)
     ).replace("{intent}", intent)
 
     try:
@@ -376,10 +376,10 @@ def debate_round2_openai_critique(
         for s in snapshots
     ]
     prompt = (
-        f"You are a strict Risk Manager. Gemini has proposed a {intent} thesis. Your job is to criticize it: bear market scenarios, technical traps, overbought/oversold false signals.\n"
+        "You are a strict Risk Manager. Gemini has proposed a {intent} thesis. Your job is to CRITICIZE it using technical analysis: check RSI (overbought/oversold traps), price vs SMA20/SMA50 (false breakouts), and 5d/21d returns (reversal risk). Only agree with STRONG BUY or STRONG SELL when the technical evidence is solid and consistent.\n"
         "Rules:\n"
-        "- Respond ONLY in English. Use plain language.\n"
-        "- For each ticker, output: ticker, critique (short), verdict_after_critique: exactly one of 'STRONG BUY', 'STRONG SELL', 'HOLD'. If you disagree with {intent}, use HOLD or the opposite.\n"
+        "- For each ticker: (1) Give a short technical critique (e.g. 'RSI near 70, risk of pullback' or 'Price extended above SMAs, momentum may fade'). (2) Set verdict_after_critique to exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'. Use HOLD whenever the technical picture is ambiguous or your critique undermines the thesis.\n"
+        "- Be strict: if you see a technical weakness (e.g. RSI >68 for a BUY, or price far below SMAs for a SELL without clear oversold), prefer HOLD. Only STRONG BUY/STRONG SELL when you agree after your critique.\n"
         "- Return ONLY a JSON array. No other text.\n"
         "Format: [{\"ticker\":\"XXX.IS\",\"critique\":\"...\",\"verdict_after_critique\":\"STRONG BUY|STRONG SELL|HOLD\"}]\n\n"
         f"Technical data: {json.dumps(compact)}\n\n"
@@ -394,7 +394,7 @@ def debate_round2_openai_critique(
                 {"role": "system", "content": SYSTEM_ENGLISH + " Output only JSON array."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
+            temperature=0.1,
         )
         text = res.choices[0].message.content or ""
         block = extract_json_block(text)
@@ -420,11 +420,10 @@ def debate_round3_gemini_reply(
         return None
     lines = [format_snapshot_line(s) for s in snapshots]
     prompt = (
-        f"Your {intent} thesis was criticized by a Risk Manager. Reply to the critique and give your FINAL stance per ticker.\n"
+        "Your {intent} thesis was criticized by a Risk Manager. Reply with technical arguments: reference RSI, SMA20/SMA50, and returns. Give your FINAL stance per ticker.\n"
         "Rules:\n"
-        "- Respond ONLY in English. Plain language.\n"
-        "- For each ticker set final_action to exactly one of: 'STRONG BUY', 'STRONG SELL', 'HOLD'. Only use STRONG BUY or STRONG SELL if you remain confident after the critique.\n"
-        "- Include: ticker, reply (short), final_action, reason, entry_price, target_exit_price.\n"
+        "- For each ticker set final_action to exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'. Use STRONG BUY or STRONG SELL ONLY if the technical evidence (RSI, trend, momentum) still strongly supports it after the critique; otherwise use HOLD.\n"
+        "- Include: ticker, reply (short, technical), final_action, reason, entry_price, target_exit_price.\n"
         "- Return ONLY a JSON array.\n"
         "Format: [{\"ticker\":\"XXX.IS\",\"reply\":\"...\",\"final_action\":\"STRONG BUY|STRONG SELL|HOLD\",\"reason\":\"...\",\"entry_price\":number,\"target_exit_price\":number}]\n\n"
         "Data:\n" + "\n".join(lines) + "\n\n--- Your thesis (Round 1) ---\n" + thesis_text + "\n\n--- Risk Manager critique (Round 2) ---\n" + critique_text
@@ -462,10 +461,10 @@ def debate_final_openai_verdict(
         return None
     compact = [{"ticker": s.ticker, "price": s.price} for s in snapshots]
     prompt = (
-        "Summarize the debate and give your FINAL VERDICT for each ticker. Only STRONG BUY or STRONG SELL if you agree with the final thesis; otherwise HOLD.\n"
+        "Summarize the debate and give your FINAL VERDICT for each ticker. Use STRONG BUY or STRONG SELL ONLY when the technical case (RSI, SMAs, momentum) is clear and you agree with Gemini's final stance; otherwise output HOLD. Be consistent: only tickers with strong technical agreement from both sides should get STRONG BUY or STRONG SELL.\n"
         "Rules:\n"
-        "- Respond ONLY in English. Plain language.\n"
-        "- For each ticker output: ticker, verdict (exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'), entry_price, target_exit_price, summary_reason (plain English, no jargon).\n"
+        "- For each ticker output: ticker, verdict (exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'), entry_price, target_exit_price, summary_reason (plain English).\n"
+        "- When in doubt or when the critique raised valid technical concerns, use HOLD. The final list should contain only high-confidence agreements.\n"
         "- Return ONLY a JSON array. No other text.\n"
         "Format: [{\"ticker\":\"XXX.IS\",\"verdict\":\"STRONG BUY|STRONG SELL|HOLD\",\"entry_price\":number,\"target_exit_price\":number,\"summary_reason\":\"...\"}]\n\n"
         f"Data: {json.dumps(compact)}\n\n--- Round 1 (Gemini thesis) ---\n{round1_text}\n\n--- Round 2 (Risk Manager critique) ---\n{round2_text}\n\n--- Round 3 (Gemini reply) ---\n{round3_text}"
@@ -479,7 +478,7 @@ def debate_final_openai_verdict(
                 {"role": "system", "content": SYSTEM_ENGLISH + " Output only JSON array."},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.2,
+            temperature=0.1,
         )
         text = res.choices[0].message.content or ""
         block = extract_json_block(text)
@@ -735,9 +734,15 @@ def format_combined_email(
     main_opps = [o for o in all_recs if o.get("ticker", "") not in target_prices]
     owned_by_ticker = {o.get("ticker", ""): o for o in all_recs if o.get("ticker", "") in target_prices}
     owned_opps = list(owned_by_ticker.values())
-    urgent_tickers = {a.get("ticker", "") for a in alerts_sent_this_run} | {a.get("ticker", "") for a in band_alerts}
-    rec_by_ticker = {o.get("ticker", ""): o for o in all_recs}
-    leaders = [rec_by_ticker[t] for t in urgent_tickers if t in rec_by_ticker]
+    # THE OPPORTUNITY LEADERS = intersection of tickers in DAILY RECOMMENDATION and in URGENT OPPORTUNITY (drop alerts only)
+    strong_buy_main = sorted(
+        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    daily_rec_tickers = {o.get("ticker", "") for o in strong_buy_main}
+    urgent_section_tickers = {a.get("ticker", "") for a in alerts_sent_this_run}
+    leaders_tickers = daily_rec_tickers & urgent_section_tickers
+    leaders = [o for o in strong_buy_main if o.get("ticker", "") in leaders_tickers]
 
     strong_sell_owned = sorted(
         [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
@@ -747,18 +752,9 @@ def format_combined_email(
         [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
         key=lambda o: (o.get("ticker") or ""),
     )
-    strong_buy_main = sorted(
-        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
-    strong_sell_leaders = sorted(
-        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
-    strong_buy_leaders = sorted(
-        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
+    # Leaders are from DAILY RECOMMENDATION (STRONG BUY only), so all leaders are STRONG BUY
+    strong_buy_leaders = sorted(leaders, key=lambda o: (o.get("ticker") or ""))
+    strong_sell_leaders = []
 
     # 1. MY POSITIONS (only if has content)
     if strong_sell_owned or strong_buy_owned:
