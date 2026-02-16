@@ -717,7 +717,7 @@ def format_combined_email(
     alerts_sent_this_run: List[Dict[str, Any]],
     band_alerts: List[Dict[str, Any]],
 ) -> Tuple[str, str]:
-    """Single email: My Positions, Daily Recommendation, Urgent Opportunity, The Opportunity Leaders (intersection), disclaimer. Same styles as existing templates."""
+    """Single email: sections only when they have content; no header or spacing for empty sections."""
     today = datetime.now().strftime("%d-%m-%Y")
     subject = f"Daily Recommendation - {today}"
     target_prices = target_prices or {}
@@ -726,21 +726,19 @@ def format_combined_email(
     def line_br() -> None:
         parts.append("<br>")
 
+    def section_sep() -> None:
+        if parts:
+            line_br()
+            line_br()
+            line_br()
+
     main_opps = [o for o in all_recs if o.get("ticker", "") not in target_prices]
-    # Deduplicate owned by ticker (same ticker can appear in both approved_buy and approved_sell; keep one)
     owned_by_ticker = {o.get("ticker", ""): o for o in all_recs if o.get("ticker", "") in target_prices}
     owned_opps = list(owned_by_ticker.values())
     urgent_tickers = {a.get("ticker", "") for a in alerts_sent_this_run} | {a.get("ticker", "") for a in band_alerts}
     rec_by_ticker = {o.get("ticker", ""): o for o in all_recs}
     leaders = [rec_by_ticker[t] for t in urgent_tickers if t in rec_by_ticker]
 
-    # ---------- 1. MY POSITIONS (STRONG BUY and STRONG SELL only, one per ticker) ----------
-    line_br()
-    line_br()
-    line_br()
-    parts.append("<b>MY POSITIONS</b>")
-    line_br()
-    line_br()
     strong_sell_owned = sorted(
         [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
         key=lambda o: (o.get("ticker") or ""),
@@ -749,54 +747,71 @@ def format_combined_email(
         [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
         key=lambda o: (o.get("ticker") or ""),
     )
-    num = 1
-    for o in strong_sell_owned:
-        ticker = o.get("ticker", "")
-        tp = target_prices.get(ticker, {}) or {}
-        purchase = safe_float(tp.get("purchase_price"))
-        entry, target = o.get("entry_price"), o.get("target_exit_price")
-        reason = (o.get("reason") or "").strip() or "No additional comment."
-        purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
-        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
-        target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
-        line_br()
-        parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
-        line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
-        line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
-        line_br()
-        line_br()
-        num += 1
-    for o in strong_buy_owned:
-        ticker = o.get("ticker", "")
-        tp = target_prices.get(ticker, {}) or {}
-        purchase = safe_float(tp.get("purchase_price"))
-        entry, target = o.get("entry_price"), o.get("target_exit_price")
-        reason = (o.get("reason") or "").strip() or "No additional comment."
-        purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
-        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
-        target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
-        line_br()
-        parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
-        line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
-        line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
-        line_br()
-        line_br()
-        num += 1
+    strong_buy_main = sorted(
+        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    strong_sell_leaders = sorted(
+        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    strong_buy_leaders = sorted(
+        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
 
-    # ---------- 2. PRICE BAND ALERT (right after MY POSITIONS) ----------
-    line_br()
-    line_br()
-    line_br()
-    parts.append("<b>PRICE BAND ALERT</b>")
-    line_br()
-    line_br()
+    # 1. MY POSITIONS (only if has content)
+    if strong_sell_owned or strong_buy_owned:
+        section_sep()
+        parts.append("<b>MY POSITIONS</b>")
+        line_br()
+        line_br()
+        num = 1
+        for o in strong_sell_owned:
+            ticker = o.get("ticker", "")
+            tp = target_prices.get(ticker, {}) or {}
+            purchase = safe_float(tp.get("purchase_price"))
+            entry, target = o.get("entry_price"), o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+            line_br()
+            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
+            num += 1
+        for o in strong_buy_owned:
+            ticker = o.get("ticker", "")
+            tp = target_prices.get(ticker, {}) or {}
+            purchase = safe_float(tp.get("purchase_price"))
+            entry, target = o.get("entry_price"), o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+            line_br()
+            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
+            num += 1
+
+    # 2. PRICE BAND ALERT (only if has content)
     if band_alerts:
+        section_sep()
+        parts.append("<b>PRICE BAND ALERT</b>")
+        line_br()
+        line_br()
         for i, a in enumerate(band_alerts, 1):
             t = a.get("ticker", "")
             p = a.get("price")
@@ -808,41 +823,34 @@ def format_combined_email(
             line_br()
             line_br()
 
-    # ---------- 3. DAILY RECOMMENDATION (STRONG BUY only) ----------
-    line_br()
-    line_br()
-    line_br()
-    parts.append("<b>DAILY RECOMMENDATION</b>")
-    line_br()
-    line_br()
-    strong_buy_main = sorted(
-        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
-    num = 1
-    for o in strong_buy_main:
-        ticker = o.get("ticker", "")
-        entry, target = o.get("entry_price"), o.get("target_exit_price")
-        reason = (o.get("reason") or "").strip() or "No additional comment."
-        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
-        target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
-        line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
-        line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+    # 3. DAILY RECOMMENDATION (only if has content)
+    if strong_buy_main:
+        section_sep()
+        parts.append("<b>DAILY RECOMMENDATION</b>")
         line_br()
         line_br()
-        num += 1
+        num = 1
+        for o in strong_buy_main:
+            ticker = o.get("ticker", "")
+            entry, target = o.get("entry_price"), o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
+            num += 1
 
-    # ---------- 4. URGENT OPPORTUNITY (drop alerts only) ----------
-    line_br()
-    line_br()
-    line_br()
-    parts.append("<b>URGENT OPPORTUNITY</b>")
-    line_br()
-    line_br()
+    # 4. URGENT OPPORTUNITY (only if has content)
     if alerts_sent_this_run:
+        section_sep()
+        parts.append("<b>URGENT OPPORTUNITY</b>")
+        line_br()
+        line_br()
         parts.append("The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).")
         line_br()
         line_br()
@@ -859,57 +867,46 @@ def format_combined_email(
                 line_br()
             line_br()
 
-    # ---------- 5. THE OPPORTUNITY LEADERS (intersection) ----------
-    line_br()
-    line_br()
-    line_br()
-    parts.append("<b>THE OPPORTUNITY LEADERS</b>")
-    line_br()
-    parts.append("(Tickers that appear in both Daily Recommendation and Urgent Opportunity)")
-    line_br()
-    line_br()
-    strong_sell_leaders = sorted(
-        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
-    strong_buy_leaders = sorted(
-        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
-    num = 1
-    for o in strong_sell_leaders:
-        ticker = o.get("ticker", "")
-        entry, target = o.get("entry_price"), o.get("target_exit_price")
-        reason = (o.get("reason") or "").strip() or "No additional comment."
-        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
-        target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+    # 5. THE OPPORTUNITY LEADERS (only if has content)
+    if strong_sell_leaders or strong_buy_leaders:
+        section_sep()
+        parts.append("<b>THE OPPORTUNITY LEADERS</b>")
         line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
-        line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        parts.append("(Tickers that appear in both Daily Recommendation and Urgent Opportunity)")
         line_br()
         line_br()
-        num += 1
-    for o in strong_buy_leaders:
-        ticker = o.get("ticker", "")
-        entry, target = o.get("entry_price"), o.get("target_exit_price")
-        reason = (o.get("reason") or "").strip() or "No additional comment."
-        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
-        target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
-        line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
-        line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
-        line_br()
-        line_br()
-        num += 1
+        num = 1
+        for o in strong_sell_leaders:
+            ticker = o.get("ticker", "")
+            entry, target = o.get("entry_price"), o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
+            num += 1
+        for o in strong_buy_leaders:
+            ticker = o.get("ticker", "")
+            entry, target = o.get("entry_price"), o.get("target_exit_price")
+            reason = (o.get("reason") or "").strip() or "No additional comment."
+            entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+            target_s = f"{target:.2f}" if target is not None else "N/A"
+            parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+            line_br()
+            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            line_br()
+            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            line_br()
+            line_br()
+            num += 1
 
-    # ---------- 6. Disclaimer ----------
-    line_br()
-    line_br()
-    line_br()
+    # 6. Disclaimer (always, with spacing if there was any content)
+    section_sep()
     parts.append("<b>This is not investment advice; for informational purposes only.</b>")
     return subject, "<html><body>" + "".join(parts) + "</body></html>"
 
