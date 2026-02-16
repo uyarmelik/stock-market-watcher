@@ -56,7 +56,7 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Daily Report (single email: My Positions, Daily Recommendation, Urgent Opportunity, Opportunity Leaders)
+      - name: "Run Daily Report (single email: My Positions, Daily Recommendation, Urgent Opportunity, Opportunity Leaders)"
         env:
           EMAIL_USER: ${{ secrets.EMAIL_USER }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
