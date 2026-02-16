@@ -711,6 +711,222 @@ def format_opportunity_email_plain_english(
     return subject, "<html><body>" + "".join(parts) + "</body></html>"
 
 
+def format_combined_email(
+    all_recs: List[Dict[str, Any]],
+    target_prices: Dict[str, Any],
+    alerts_sent_this_run: List[Dict[str, Any]],
+    band_alerts: List[Dict[str, Any]],
+) -> Tuple[str, str]:
+    """Single email: My Positions, Daily Recommendation, Urgent Opportunity, The Opportunity Leaders (intersection), disclaimer. Same styles as existing templates."""
+    today = datetime.now().strftime("%d-%m-%Y")
+    subject = f"Daily Recommendation - {today}"
+    target_prices = target_prices or {}
+    parts: List[str] = []
+
+    def line_br() -> None:
+        parts.append("<br>")
+
+    main_opps = [o for o in all_recs if o.get("ticker", "") not in target_prices]
+    owned_opps = [o for o in all_recs if o.get("ticker", "") in target_prices]
+    urgent_tickers = {a.get("ticker", "") for a in alerts_sent_this_run} | {a.get("ticker", "") for a in band_alerts}
+    rec_by_ticker = {o.get("ticker", ""): o for o in all_recs}
+    leaders = [rec_by_ticker[t] for t in urgent_tickers if t in rec_by_ticker]
+
+    # ---------- 1. MY POSITIONS ----------
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>MY POSITIONS</b>")
+    line_br()
+    line_br()
+    strong_sell_owned = sorted(
+        [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    strong_buy_owned = sorted(
+        [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    num = 1
+    for o in strong_sell_owned:
+        ticker = o.get("ticker", "")
+        tp = target_prices.get(ticker, {}) or {}
+        purchase = safe_float(tp.get("purchase_price"))
+        entry, target = o.get("entry_price"), o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+        line_br()
+        parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
+        num += 1
+    for o in strong_buy_owned:
+        ticker = o.get("ticker", "")
+        tp = target_prices.get(ticker, {}) or {}
+        purchase = safe_float(tp.get("purchase_price"))
+        entry, target = o.get("entry_price"), o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+        line_br()
+        parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
+        num += 1
+
+    # ---------- 2. DAILY RECOMMENDATION ----------
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>DAILY RECOMMENDATION</b>")
+    line_br()
+    line_br()
+    strong_sell_main = sorted(
+        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    strong_buy_main = sorted(
+        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    num = 1
+    for o in strong_sell_main:
+        ticker = o.get("ticker", "")
+        entry, target = o.get("entry_price"), o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
+        num += 1
+    for o in strong_buy_main:
+        ticker = o.get("ticker", "")
+        entry, target = o.get("entry_price"), o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
+        num += 1
+
+    # ---------- 3. URGENT OPPORTUNITY ----------
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>URGENT OPPORTUNITY</b>")
+    line_br()
+    line_br()
+    if alerts_sent_this_run:
+        parts.append("The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).")
+        line_br()
+        line_br()
+        for i, a in enumerate(alerts_sent_this_run, 1):
+            t = a.get("ticker", "")
+            p = a.get("price")
+            parts.append(f"<b>{i}. {t}</b>: current price {p:.2f}")
+            line_br()
+            if a.get("below_sma20_pct"):
+                parts.append("  — Price is 20% or more below the 1-year average.")
+                line_br()
+            if a.get("below_high30_pct"):
+                parts.append("  — Price is 30% or more below the 52-week high.")
+                line_br()
+            line_br()
+    if band_alerts:
+        line_br()
+        line_br()
+        parts.append("<b>PRICE BAND ALERT</b>")
+        line_br()
+        line_br()
+        for i, a in enumerate(band_alerts, 1):
+            t = a.get("ticker", "")
+            p = a.get("price")
+            pp = a.get("purchase_price")
+            if a.get("kind") == "below":
+                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            else:
+                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            line_br()
+            line_br()
+
+    # ---------- 4. THE OPPORTUNITY LEADERS (intersection) ----------
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>THE OPPORTUNITY LEADERS</b>")
+    line_br()
+    parts.append("(Tickers that appear in both Daily Recommendation and Urgent Opportunity)")
+    line_br()
+    line_br()
+    strong_sell_leaders = sorted(
+        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    strong_buy_leaders = sorted(
+        [o for o in leaders if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        key=lambda o: (o.get("ticker") or ""),
+    )
+    num = 1
+    for o in strong_sell_leaders:
+        ticker = o.get("ticker", "")
+        entry, target = o.get("entry_price"), o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
+        num += 1
+    for o in strong_buy_leaders:
+        ticker = o.get("ticker", "")
+        entry, target = o.get("entry_price"), o.get("target_exit_price")
+        reason = (o.get("reason") or "").strip() or "No additional comment."
+        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
+        target_s = f"{target:.2f}" if target is not None else "N/A"
+        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+        line_br()
+        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        line_br()
+        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        line_br()
+        line_br()
+        num += 1
+
+    # ---------- 5. Disclaimer ----------
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>This is not investment advice; for informational purposes only.</b>")
+    return subject, "<html><body>" + "".join(parts) + "</body></html>"
+
+
 # ---------- Scenario A: Opportunity Hunter (weekdays 12:15) ----------
 
 def run_opportunity_hunter() -> None:
@@ -785,9 +1001,8 @@ def get_yearly_metrics(ticker: str) -> Optional[Dict[str, float]]:
         return None
 
 
-def run_drop_detector() -> None:
-    """Check: (1) 20% below SMA252 or 30% below 52w high; (2) target_prices: price vs purchase ±5% band. Send one email only when there is at least one alert."""
-    config = read_json(CONFIG_PATH)
+def get_drop_and_band_alerts(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Compute drop alerts (SMA252/52w high) and band alerts (purchase ±5%). Update alert_states.json. Return (alerts_sent_this_run, band_alerts)."""
     tickers = list(config.get("tickers", []))
     target_prices = config.get("target_prices", {}) or {}
     if isinstance(target_prices, dict):
@@ -795,7 +1010,7 @@ def run_drop_detector() -> None:
             if t not in tickers:
                 tickers.append(t)
     if not tickers:
-        return
+        return [], []
 
     states = read_json(ALERT_STATES_PATH)
     alerts_sent_this_run: List[Dict[str, Any]] = []
@@ -874,7 +1089,13 @@ def run_drop_detector() -> None:
             continue
 
     write_json(ALERT_STATES_PATH, states)
+    return alerts_sent_this_run, band_alerts
 
+
+def run_drop_detector() -> None:
+    """Check drop/band alerts, update state; send one email only when there is at least one alert."""
+    config = read_json(CONFIG_PATH)
+    alerts_sent_this_run, band_alerts = get_drop_and_band_alerts(config)
     if not alerts_sent_this_run and not band_alerts:
         return
 
@@ -1019,15 +1240,15 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
             "recommendations": all_recs,
         },
     )
-    if all_recs:
-        subject, body = format_opportunity_email_plain_english(
-            all_recs,
-            "Daily Recommendation — Approved Signals",
-            target_prices=target_prices,
+    drop_alerts, band_alerts = get_drop_and_band_alerts(config)
+    has_content = bool(all_recs or drop_alerts or band_alerts)
+    if has_content:
+        subject, body = format_combined_email(
+            all_recs, target_prices, drop_alerts, band_alerts
         )
         send_email(subject, body, body_subtype="html")
     else:
-        print("No STRONG BUY/STRONG SELL agreements; no email sent.")
+        print("No recommendations or alerts; no email sent.")
 
 
 def parse_args() -> argparse.Namespace:
