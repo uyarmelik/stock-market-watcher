@@ -727,12 +727,14 @@ def format_combined_email(
         parts.append("<br>")
 
     main_opps = [o for o in all_recs if o.get("ticker", "") not in target_prices]
-    owned_opps = [o for o in all_recs if o.get("ticker", "") in target_prices]
+    # Deduplicate owned by ticker (same ticker can appear in both approved_buy and approved_sell; keep one)
+    owned_by_ticker = {o.get("ticker", ""): o for o in all_recs if o.get("ticker", "") in target_prices}
+    owned_opps = list(owned_by_ticker.values())
     urgent_tickers = {a.get("ticker", "") for a in alerts_sent_this_run} | {a.get("ticker", "") for a in band_alerts}
     rec_by_ticker = {o.get("ticker", ""): o for o in all_recs}
     leaders = [rec_by_ticker[t] for t in urgent_tickers if t in rec_by_ticker]
 
-    # ---------- 1. MY POSITIONS ----------
+    # ---------- 1. MY POSITIONS (STRONG BUY and STRONG SELL only, one per ticker) ----------
     line_br()
     line_br()
     line_br()
@@ -787,36 +789,37 @@ def format_combined_email(
         line_br()
         num += 1
 
-    # ---------- 2. DAILY RECOMMENDATION ----------
+    # ---------- 2. PRICE BAND ALERT (right after MY POSITIONS) ----------
+    line_br()
+    line_br()
+    line_br()
+    parts.append("<b>PRICE BAND ALERT</b>")
+    line_br()
+    line_br()
+    if band_alerts:
+        for i, a in enumerate(band_alerts, 1):
+            t = a.get("ticker", "")
+            p = a.get("price")
+            pp = a.get("purchase_price")
+            if a.get("kind") == "below":
+                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            else:
+                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+            line_br()
+            line_br()
+
+    # ---------- 3. DAILY RECOMMENDATION (STRONG BUY only) ----------
     line_br()
     line_br()
     line_br()
     parts.append("<b>DAILY RECOMMENDATION</b>")
     line_br()
     line_br()
-    strong_sell_main = sorted(
-        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
-        key=lambda o: (o.get("ticker") or ""),
-    )
     strong_buy_main = sorted(
         [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
         key=lambda o: (o.get("ticker") or ""),
     )
     num = 1
-    for o in strong_sell_main:
-        ticker = o.get("ticker", "")
-        entry, target = o.get("entry_price"), o.get("target_exit_price")
-        reason = (o.get("reason") or "").strip() or "No additional comment."
-        entry_s = f"{entry:.2f}" if entry is not None else "N/A"
-        target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
-        line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
-        line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
-        line_br()
-        line_br()
-        num += 1
     for o in strong_buy_main:
         ticker = o.get("ticker", "")
         entry, target = o.get("entry_price"), o.get("target_exit_price")
@@ -832,7 +835,7 @@ def format_combined_email(
         line_br()
         num += 1
 
-    # ---------- 3. URGENT OPPORTUNITY ----------
+    # ---------- 4. URGENT OPPORTUNITY (drop alerts only) ----------
     line_br()
     line_br()
     line_br()
@@ -855,24 +858,8 @@ def format_combined_email(
                 parts.append("  — Price is 30% or more below the 52-week high.")
                 line_br()
             line_br()
-    if band_alerts:
-        line_br()
-        line_br()
-        parts.append("<b>PRICE BAND ALERT</b>")
-        line_br()
-        line_br()
-        for i, a in enumerate(band_alerts, 1):
-            t = a.get("ticker", "")
-            p = a.get("price")
-            pp = a.get("purchase_price")
-            if a.get("kind") == "below":
-                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
-            else:
-                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
-            line_br()
-            line_br()
 
-    # ---------- 4. THE OPPORTUNITY LEADERS (intersection) ----------
+    # ---------- 5. THE OPPORTUNITY LEADERS (intersection) ----------
     line_br()
     line_br()
     line_br()
@@ -919,7 +906,7 @@ def format_combined_email(
         line_br()
         num += 1
 
-    # ---------- 5. Disclaimer ----------
+    # ---------- 6. Disclaimer ----------
     line_br()
     line_br()
     line_br()
