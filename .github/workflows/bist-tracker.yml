@@ -2,7 +2,7 @@ name: BIST Stock Tracker
 
 on:
   schedule:
-    - cron: "30 10-17 * * 1-5"
+    - cron: "30 7-14 * * 1-5"
     - cron: "15 7-14 * * 1-5"
   workflow_dispatch:
 
@@ -44,7 +44,7 @@ jobs:
 
   daily-ai-analysis:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '30 10-17 * * 1-5' || github.event_name == 'workflow_dispatch'
+    if: github.event.schedule == '30 7-14 * * 1-5' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v3
 

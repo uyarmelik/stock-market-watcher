@@ -104,6 +104,15 @@
         },
         "PATEK.IS": {
             "purchase_price": 20.78
+        },
+        "TKFEN.IS": {
+            "purchase_price": 85.70
+        },
+        "DAPGM.IS": {
+            "purchase_price": 13.10
+        },
+        "SASA.IS": {
+            "purchase_price": 2.64
         }
     }
 }
