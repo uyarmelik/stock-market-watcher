@@ -1,36 +1,36 @@
 {
-  "updated_at": "2026-02-18T07:36:26",
+  "updated_at": "2026-02-18T08:29:56",
   "targets": {
     "ALTNY.IS": {
-      "price": 16.54,
+      "price": 16.48,
       "status": "IN_RANGE",
       "purchase_price": 16.75,
       "low": 15.91,
       "high": 17.59
     },
     "PATEK.IS": {
-      "price": 20.42,
+      "price": 20.46,
       "status": "IN_RANGE",
       "purchase_price": 20.78,
       "low": 19.74,
       "high": 21.82
     },
     "TKFEN.IS": {
-      "price": 86.3,
+      "price": 87.1,
       "status": "IN_RANGE",
       "purchase_price": 85.7,
       "low": 81.41,
       "high": 89.99
     },
     "DAPGM.IS": {
-      "price": 13.37,
+      "price": 13.31,
       "status": "IN_RANGE",
       "purchase_price": 13.1,
       "low": 12.44,
       "high": 13.76
     },
     "SASA.IS": {
-      "price": 2.62,
+      "price": 2.66,
       "status": "IN_RANGE",
       "purchase_price": 2.64,
       "low": 2.51,
