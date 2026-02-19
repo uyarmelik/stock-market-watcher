@@ -37,7 +37,7 @@ MAIL_PASS = ENV.get("EMAIL_PASS")
 MAIL_RCVR = ENV.get("RECEIVER_EMAIL")
 
 GEMINI_MODEL = ENV.get("GEMINI_MODEL", "gemini-2.5-flash")
-OPENAI_MODEL = ENV.get("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = ENV.get("OPENAI_MODEL", "gpt-4.1-mini")
 
 BIST_EQUITY_CSV_URL = ENV.get(
     "BIST_EQUITY_CSV_URL",
@@ -48,7 +48,6 @@ CONFIG_PATH = "config.json"
 STOCK_STATES_PATH = "stock_states.json"
 ALERT_STATES_PATH = "alert_states.json"
 
-# Verdicts that require both models to agree; anything else is filtered out.
 STRONG_VERDICTS = ("STRONG BUY", "STRONG SELL")
 
 
@@ -222,9 +221,7 @@ def load_universe(config: Dict[str, Any], universe: str) -> List[str]:
     return cfg if cfg else fetch_bist_tickers_from_borsaistanbul()
 
 
-def download_history(
-    tickers: List[str], period: str = "3mo"
-) -> Optional[pd.DataFrame]:
+def download_history(tickers: List[str], period: str = "3mo") -> Optional[pd.DataFrame]:
     if not tickers:
         return pd.DataFrame()
     try:
@@ -286,9 +283,12 @@ def build_snapshots(
             r21 = pct_return(close, 21)
             tp = target_prices.get(t, {}) if isinstance(target_prices, dict) else {}
             purchase_price = safe_float(tp.get("purchase_price"))
-            # Low/high only from purchase_price: 95% and 105% (no config low/high)
-            low = round(purchase_price * 0.95, 2) if purchase_price is not None else None
-            high = round(purchase_price * 1.05, 2) if purchase_price is not None else None
+            low = (
+                round(purchase_price * 0.95, 2) if purchase_price is not None else None
+            )
+            high = (
+                round(purchase_price * 1.05, 2) if purchase_price is not None else None
+            )
             base = baseline_action(price, sma20, sma50, rsi14)
             snapshots.append(
                 StockSnapshot(
@@ -313,12 +313,11 @@ def build_snapshots(
     return snapshots
 
 
-# ---------- Debate loop: Gemini (Round 1 & 3) <-> OpenAI (Round 2 & Final) ----------
-
 SYSTEM_ENGLISH = (
     "You must respond only in English. Use plain language suitable for someone without financial expertise. "
     "Avoid jargon; use phrases like 'Price is too high, risk of drop' or 'Price is below average, buying opportunity.'"
 )
+
 
 def debate_round1_gemini_thesis(
     snapshots: List[StockSnapshot], intent: str
@@ -334,8 +333,9 @@ def debate_round1_gemini_thesis(
         "- Output: ticker, action (exactly '{intent}' or 'HOLD'), reason (short, technically grounded), entry_price (number), target_exit_price (number).\n"
         "- If RSI, SMAs or returns do not clearly support {intent}, set action to 'HOLD'. Prefer HOLD when in doubt.\n"
         "- Return ONLY a JSON array. No other text.\n"
-        "Format: [{\"ticker\":\"XXX.IS\",\"action\":\"BUY|SELL|HOLD\",\"reason\":\"...\",\"entry_price\":number,\"target_exit_price\":number}]\n\n"
-        "Data (P=price, RSI, SMA20, SMA50, R5=5d return %, R21=21d return %, BASE=heuristic):\n" + "\n".join(lines)
+        'Format: [{"ticker":"XXX.IS","action":"BUY|SELL|HOLD","reason":"...","entry_price":number,"target_exit_price":number}]\n\n'
+        "Data (P=price, RSI, SMA20, SMA50, R5=5d return %, R21=21d return %, BASE=heuristic):\n"
+        + "\n".join(lines)
     ).replace("{intent}", intent)
 
     try:
@@ -381,7 +381,7 @@ def debate_round2_openai_critique(
         "- For each ticker: (1) Give a short technical critique (e.g. 'RSI near 70, risk of pullback' or 'Price extended above SMAs, momentum may fade'). (2) Set verdict_after_critique to exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'. Use HOLD whenever the technical picture is ambiguous or your critique undermines the thesis.\n"
         "- Be strict: if you see a technical weakness (e.g. RSI >68 for a BUY, or price far below SMAs for a SELL without clear oversold), prefer HOLD. Only STRONG BUY/STRONG SELL when you agree after your critique.\n"
         "- Return ONLY a JSON array. No other text.\n"
-        "Format: [{\"ticker\":\"XXX.IS\",\"critique\":\"...\",\"verdict_after_critique\":\"STRONG BUY|STRONG SELL|HOLD\"}]\n\n"
+        'Format: [{"ticker":"XXX.IS","critique":"...","verdict_after_critique":"STRONG BUY|STRONG SELL|HOLD"}]\n\n'
         f"Technical data: {json.dumps(compact)}\n\n"
         f"Gemini thesis (Round 1):\n{thesis_text}"
     ).replace("{intent}", intent)
@@ -391,7 +391,10 @@ def debate_round2_openai_critique(
         res = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_ENGLISH + " Output only JSON array."},
+                {
+                    "role": "system",
+                    "content": SYSTEM_ENGLISH + " Output only JSON array.",
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
@@ -425,8 +428,13 @@ def debate_round3_gemini_reply(
         "- For each ticker set final_action to exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'. Use STRONG BUY or STRONG SELL ONLY if the technical evidence (RSI, trend, momentum) still strongly supports it after the critique; otherwise use HOLD.\n"
         "- Include: ticker, reply (short, technical), final_action, reason, entry_price, target_exit_price.\n"
         "- Return ONLY a JSON array.\n"
-        "Format: [{\"ticker\":\"XXX.IS\",\"reply\":\"...\",\"final_action\":\"STRONG BUY|STRONG SELL|HOLD\",\"reason\":\"...\",\"entry_price\":number,\"target_exit_price\":number}]\n\n"
-        "Data:\n" + "\n".join(lines) + "\n\n--- Your thesis (Round 1) ---\n" + thesis_text + "\n\n--- Risk Manager critique (Round 2) ---\n" + critique_text
+        'Format: [{"ticker":"XXX.IS","reply":"...","final_action":"STRONG BUY|STRONG SELL|HOLD","reason":"...","entry_price":number,"target_exit_price":number}]\n\n'
+        "Data:\n"
+        + "\n".join(lines)
+        + "\n\n--- Your thesis (Round 1) ---\n"
+        + thesis_text
+        + "\n\n--- Risk Manager critique (Round 2) ---\n"
+        + critique_text
     ).replace("{intent}", intent)
 
     try:
@@ -466,7 +474,7 @@ def debate_final_openai_verdict(
         "- For each ticker output: ticker, verdict (exactly 'STRONG BUY', 'STRONG SELL', or 'HOLD'), entry_price, target_exit_price, summary_reason (plain English).\n"
         "- When in doubt or when the critique raised valid technical concerns, use HOLD. The final list should contain only high-confidence agreements.\n"
         "- Return ONLY a JSON array. No other text.\n"
-        "Format: [{\"ticker\":\"XXX.IS\",\"verdict\":\"STRONG BUY|STRONG SELL|HOLD\",\"entry_price\":number,\"target_exit_price\":number,\"summary_reason\":\"...\"}]\n\n"
+        'Format: [{"ticker":"XXX.IS","verdict":"STRONG BUY|STRONG SELL|HOLD","entry_price":number,"target_exit_price":number,"summary_reason":"..."}]\n\n'
         f"Data: {json.dumps(compact)}\n\n--- Round 1 (Gemini thesis) ---\n{round1_text}\n\n--- Round 2 (Risk Manager critique) ---\n{round2_text}\n\n--- Round 3 (Gemini reply) ---\n{round3_text}"
     )
 
@@ -475,7 +483,10 @@ def debate_final_openai_verdict(
         res = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM_ENGLISH + " Output only JSON array."},
+                {
+                    "role": "system",
+                    "content": SYSTEM_ENGLISH + " Output only JSON array.",
+                },
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
@@ -513,9 +524,7 @@ def run_debate_loop(
         return []
     critique_text, critique_arr = r2
 
-    r3 = debate_round3_gemini_reply(
-        thesis_text, critique_text, snapshots, intent
-    )
+    r3 = debate_round3_gemini_reply(thesis_text, critique_text, snapshots, intent)
     if not r3:
         return []
     reply_text, reply_arr = r3
@@ -526,7 +535,6 @@ def run_debate_loop(
     if not final_arr:
         return []
 
-    # Build maps by ticker
     reply_by_ticker = {}
     for r in reply_arr:
         t = (r.get("ticker") or "").strip()
@@ -538,7 +546,6 @@ def run_debate_loop(
         if t:
             final_by_ticker[t] = f
 
-    # Only report when BOTH say STRONG BUY or BOTH say STRONG SELL (same verdict)
     approved: List[Dict[str, Any]] = []
     for s in snapshots:
         t = s.ticker
@@ -548,21 +555,29 @@ def run_debate_loop(
         openai_verdict = normalize_verdict(
             (final_by_ticker.get(t) or {}).get("verdict", "HOLD")
         )
-        if gemini_verdict not in STRONG_VERDICTS or openai_verdict not in STRONG_VERDICTS:
+        if (
+            gemini_verdict not in STRONG_VERDICTS
+            or openai_verdict not in STRONG_VERDICTS
+        ):
             continue
         if gemini_verdict != openai_verdict:
             continue
         rec = final_by_ticker.get(t) or reply_by_ticker.get(t) or {}
         entry = safe_float(rec.get("entry_price")) or s.price
-        target = safe_float(rec.get("target_exit_price")) or (s.target_high or s.price * 1.1)
-        approved.append({
-            "ticker": t,
-            "verdict": gemini_verdict,
-            "entry_price": round(entry, 2),
-            "target_exit_price": round(target, 2),
-            "reason": (rec.get("summary_reason") or rec.get("reason") or "").strip() or "Agreed after debate.",
-            "current_price": s.price,
-        })
+        target = safe_float(rec.get("target_exit_price")) or (
+            s.target_high or s.price * 1.1
+        )
+        approved.append(
+            {
+                "ticker": t,
+                "verdict": gemini_verdict,
+                "entry_price": round(entry, 2),
+                "target_exit_price": round(target, 2),
+                "reason": (rec.get("summary_reason") or rec.get("reason") or "").strip()
+                or "Agreed after debate.",
+                "current_price": s.price,
+            }
+        )
     return approved
 
 
@@ -597,16 +612,23 @@ def format_opportunity_email_plain_english(
     target_prices = target_prices or {}
     parts: List[str] = []
 
-    # Main list: only tickers NOT in target_prices (watchlist opportunities)
     main_opps = [o for o in opportunities if o.get("ticker", "") not in target_prices]
     owned_opps = [o for o in opportunities if o.get("ticker", "") in target_prices]
 
     strong_sell_main = sorted(
-        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        [
+            o
+            for o in main_opps
+            if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"
+        ],
         key=lambda o: (o.get("ticker") or ""),
     )
     strong_buy_main = sorted(
-        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        [
+            o
+            for o in main_opps
+            if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"
+        ],
         key=lambda o: (o.get("ticker") or ""),
     )
 
@@ -621,11 +643,13 @@ def format_opportunity_email_plain_english(
         reason = (o.get("reason") or "").strip() or "No additional comment."
         entry_s = f"{entry:.2f}" if entry is not None else "N/A"
         target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+        parts.append(f"<b>{num}. {ticker}</b>: STRONG SELL")
         line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        parts.append(
+            f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+        )
         line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
         line_br()
         line_br()
         num += 1
@@ -636,23 +660,32 @@ def format_opportunity_email_plain_english(
         reason = (o.get("reason") or "").strip() or "No additional comment."
         entry_s = f"{entry:.2f}" if entry is not None else "N/A"
         target_s = f"{target:.2f}" if target is not None else "N/A"
-        parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+        parts.append(f"<b>{num}. {ticker}</b>: STRONG BUY")
         line_br()
-        parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+        parts.append(
+            f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+        )
         line_br()
-        parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+        parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
         line_br()
         line_br()
         num += 1
 
-    # Owned positions: MY POSITIONS bold, 3 blank lines above
     if owned_opps and target_prices:
         strong_sell_owned = sorted(
-            [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+            [
+                o
+                for o in owned_opps
+                if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"
+            ],
             key=lambda o: (o.get("ticker") or ""),
         )
         strong_buy_owned = sorted(
-            [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+            [
+                o
+                for o in owned_opps
+                if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"
+            ],
             key=lambda o: (o.get("ticker") or ""),
         )
         line_br()
@@ -664,7 +697,9 @@ def format_opportunity_email_plain_english(
         num_owned = 1
         for o in strong_sell_owned:
             ticker = o.get("ticker", "")
-            tp = target_prices.get(ticker, {}) if isinstance(target_prices, dict) else {}
+            tp = (
+                target_prices.get(ticker, {}) if isinstance(target_prices, dict) else {}
+            )
             purchase = safe_float(tp.get("purchase_price"))
             entry = o.get("entry_price")
             target = o.get("target_exit_price")
@@ -672,19 +707,23 @@ def format_opportunity_email_plain_english(
             purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num_owned}. {ticker}</b>: STRONG SELL')
+            parts.append(f"<b>{num_owned}. {ticker}</b>: STRONG SELL")
             line_br()
-            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            parts.append(f"   <b>Your purchase price:</b> {purchase_s}")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num_owned += 1
         for o in strong_buy_owned:
             ticker = o.get("ticker", "")
-            tp = target_prices.get(ticker, {}) if isinstance(target_prices, dict) else {}
+            tp = (
+                target_prices.get(ticker, {}) if isinstance(target_prices, dict) else {}
+            )
             purchase = safe_float(tp.get("purchase_price"))
             entry = o.get("entry_price")
             target = o.get("target_exit_price")
@@ -692,13 +731,15 @@ def format_opportunity_email_plain_english(
             purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num_owned}. {ticker}</b>: STRONG BUY')
+            parts.append(f"<b>{num_owned}. {ticker}</b>: STRONG BUY")
             line_br()
-            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            parts.append(f"   <b>Your purchase price:</b> {purchase_s}")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num_owned += 1
@@ -706,7 +747,9 @@ def format_opportunity_email_plain_english(
     line_br()
     line_br()
     line_br()
-    parts.append("<b>This is not investment advice; for informational purposes only.</b>")
+    parts.append(
+        "<b>This is not investment advice; for informational purposes only.</b>"
+    )
     return subject, "<html><body>" + "".join(parts) + "</body></html>"
 
 
@@ -732,11 +775,16 @@ def format_combined_email(
             line_br()
 
     main_opps = [o for o in all_recs if o.get("ticker", "") not in target_prices]
-    owned_by_ticker = {o.get("ticker", ""): o for o in all_recs if o.get("ticker", "") in target_prices}
+    owned_by_ticker = {
+        o.get("ticker", ""): o for o in all_recs if o.get("ticker", "") in target_prices
+    }
     owned_opps = list(owned_by_ticker.values())
-    # THE OPPORTUNITY LEADERS = intersection of tickers in DAILY RECOMMENDATION and in URGENT OPPORTUNITY (drop alerts only)
     strong_buy_main = sorted(
-        [o for o in main_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        [
+            o
+            for o in main_opps
+            if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"
+        ],
         key=lambda o: (o.get("ticker") or ""),
     )
     daily_rec_tickers = {o.get("ticker", "") for o in strong_buy_main}
@@ -745,18 +793,24 @@ def format_combined_email(
     leaders = [o for o in strong_buy_main if o.get("ticker", "") in leaders_tickers]
 
     strong_sell_owned = sorted(
-        [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"],
+        [
+            o
+            for o in owned_opps
+            if normalize_verdict(o.get("verdict", "")) == "STRONG SELL"
+        ],
         key=lambda o: (o.get("ticker") or ""),
     )
     strong_buy_owned = sorted(
-        [o for o in owned_opps if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"],
+        [
+            o
+            for o in owned_opps
+            if normalize_verdict(o.get("verdict", "")) == "STRONG BUY"
+        ],
         key=lambda o: (o.get("ticker") or ""),
     )
-    # Leaders are from DAILY RECOMMENDATION (STRONG BUY only), so all leaders are STRONG BUY
     strong_buy_leaders = sorted(leaders, key=lambda o: (o.get("ticker") or ""))
     strong_sell_leaders = []
 
-    # 1. MY POSITIONS (only if has content)
     if strong_sell_owned or strong_buy_owned:
         section_sep()
         parts.append("<b>MY POSITIONS</b>")
@@ -772,13 +826,15 @@ def format_combined_email(
             purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+            parts.append(f"<b>{num}. {ticker}</b>: STRONG SELL")
             line_br()
-            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            parts.append(f"   <b>Your purchase price:</b> {purchase_s}")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num += 1
@@ -791,18 +847,19 @@ def format_combined_email(
             purchase_s = f"{purchase:.2f}" if purchase is not None else "N/A"
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+            parts.append(f"<b>{num}. {ticker}</b>: STRONG BUY")
             line_br()
-            parts.append(f'   <b>Your purchase price:</b> {purchase_s}')
+            parts.append(f"   <b>Your purchase price:</b> {purchase_s}")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num += 1
 
-    # 2. PRICE BAND ALERT (only if has content)
     if band_alerts:
         section_sep()
         parts.append("<b>PRICE BAND ALERT</b>")
@@ -813,13 +870,16 @@ def format_combined_email(
             p = a.get("price")
             pp = a.get("purchase_price")
             if a.get("kind") == "below":
-                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+                parts.append(
+                    f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f})."
+                )
             else:
-                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+                parts.append(
+                    f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f})."
+                )
             line_br()
             line_br()
 
-    # 3. DAILY RECOMMENDATION (only if has content)
     if strong_buy_main:
         section_sep()
         parts.append("<b>DAILY RECOMMENDATION</b>")
@@ -832,22 +892,25 @@ def format_combined_email(
             reason = (o.get("reason") or "").strip() or "No additional comment."
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+            parts.append(f"<b>{num}. {ticker}</b>: STRONG BUY")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num += 1
 
-    # 4. URGENT OPPORTUNITY (only if has content)
     if alerts_sent_this_run:
         section_sep()
         parts.append("<b>URGENT OPPORTUNITY</b>")
         line_br()
         line_br()
-        parts.append("The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).")
+        parts.append(
+            "The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year)."
+        )
         line_br()
         line_br()
         for i, a in enumerate(alerts_sent_this_run, 1):
@@ -863,12 +926,13 @@ def format_combined_email(
                 line_br()
             line_br()
 
-    # 5. THE OPPORTUNITY LEADERS (only if has content)
     if strong_sell_leaders or strong_buy_leaders:
         section_sep()
         parts.append("<b>THE OPPORTUNITY LEADERS</b>")
         line_br()
-        parts.append("(Tickers that appear in both Daily Recommendation and Urgent Opportunity)")
+        parts.append(
+            "(Tickers that appear in both Daily Recommendation and Urgent Opportunity)"
+        )
         line_br()
         line_br()
         num = 1
@@ -878,11 +942,13 @@ def format_combined_email(
             reason = (o.get("reason") or "").strip() or "No additional comment."
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num}. {ticker}</b>: STRONG SELL')
+            parts.append(f"<b>{num}. {ticker}</b>: STRONG SELL")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num += 1
@@ -892,33 +958,35 @@ def format_combined_email(
             reason = (o.get("reason") or "").strip() or "No additional comment."
             entry_s = f"{entry:.2f}" if entry is not None else "N/A"
             target_s = f"{target:.2f}" if target is not None else "N/A"
-            parts.append(f'<b>{num}. {ticker}</b>: STRONG BUY')
+            parts.append(f"<b>{num}. {ticker}</b>: STRONG BUY")
             line_br()
-            parts.append(f'   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}')
+            parts.append(
+                f"   <b>Entry price:</b> {entry_s}  |  <b>Target exit price:</b> {target_s}"
+            )
             line_br()
-            parts.append(f'   <b>Reason:</b> {html.escape(reason)}')
+            parts.append(f"   <b>Reason:</b> {html.escape(reason)}")
             line_br()
             line_br()
             num += 1
 
-    # 6. Disclaimer (always, with spacing if there was any content)
     section_sep()
-    parts.append("<b>This is not investment advice; for informational purposes only.</b>")
+    parts.append(
+        "<b>This is not investment advice; for informational purposes only.</b>"
+    )
     return subject, "<html><body>" + "".join(parts) + "</body></html>"
 
-
-# ---------- Scenario A: Opportunity Hunter (weekdays 12:15) ----------
 
 def run_opportunity_hunter() -> None:
     """Run BUY scan for tickers list and SELL scan for target_prices; send email only if debate approves any."""
     config = read_json(CONFIG_PATH)
     tickers_watch = list(config.get("tickers", []))
     target_prices = config.get("target_prices", {})
-    owned_tickers = list(target_prices.keys()) if isinstance(target_prices, dict) else []
+    owned_tickers = (
+        list(target_prices.keys()) if isinstance(target_prices, dict) else []
+    )
 
     all_opportunities: List[Dict[str, Any]] = []
 
-    # BUY opportunities for watchlist
     if tickers_watch:
         try:
             snap_buy = build_snapshots(
@@ -932,7 +1000,6 @@ def run_opportunity_hunter() -> None:
         except Exception as e:
             print(f"Opportunity Hunter (BUY) error: {e}")
 
-    # SELL opportunities for owned positions
     if owned_tickers:
         try:
             snap_sell = build_snapshots(
@@ -947,7 +1014,7 @@ def run_opportunity_hunter() -> None:
             print(f"Opportunity Hunter (SELL) error: {e}")
 
     if not all_opportunities:
-        return  # Do not send email when no approved opportunities
+        return
 
     subject, body = format_opportunity_email_plain_english(
         all_opportunities,
@@ -956,8 +1023,6 @@ def run_opportunity_hunter() -> None:
     )
     send_email(subject, body, body_subtype="html")
 
-
-# ---------- Scenario B: Drop Detector (weekdays 10–17, hourly) ----------
 
 def get_yearly_metrics(ticker: str) -> Optional[Dict[str, float]]:
     """Fetch 1-year data; return price, sma252, high_52w. None on error."""
@@ -981,7 +1046,9 @@ def get_yearly_metrics(ticker: str) -> Optional[Dict[str, float]]:
         return None
 
 
-def get_drop_and_band_alerts(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def get_drop_and_band_alerts(
+    config: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Compute drop alerts (SMA252/52w high) and band alerts (purchase ±5%). Update alert_states.json. Return (alerts_sent_this_run, band_alerts)."""
     tickers = list(config.get("tickers", []))
     target_prices = config.get("target_prices", {}) or {}
@@ -1006,7 +1073,6 @@ def get_drop_and_band_alerts(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any
             high_52w = m["high_52w"]
             st = dict(states.get(ticker, {}))
 
-            # --- Drop detector (SMA252 / 52w high) ---
             below_sma20 = sma252 > 0 and price <= sma252 * 0.80
             below_high30 = high_52w > 0 and price <= high_52w * 0.70
             if not (below_sma20 or below_high30):
@@ -1015,26 +1081,26 @@ def get_drop_and_band_alerts(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any
                     if last_price and price >= max(sma252 * 0.81, high_52w * 0.71):
                         st["sent"] = False
                 states[ticker] = st
-                # Band check still runs below for target_prices; do not continue here
             else:
                 already_sent = st.get("sent", False)
                 last_alert_price = safe_float(st.get("last_alert_price"))
                 if last_alert_price is not None and price <= last_alert_price * 0.95:
                     already_sent = False
                 if not already_sent:
-                    alerts_sent_this_run.append({
-                        "ticker": ticker,
-                        "price": price,
-                        "sma252": sma252,
-                        "high_52w": high_52w,
-                        "below_sma20_pct": below_sma20,
-                        "below_high30_pct": below_high30,
-                    })
+                    alerts_sent_this_run.append(
+                        {
+                            "ticker": ticker,
+                            "price": price,
+                            "sma252": sma252,
+                            "high_52w": high_52w,
+                            "below_sma20_pct": below_sma20,
+                            "below_high30_pct": below_high30,
+                        }
+                    )
                     st["sent"] = True
                     st["last_alert_price"] = price
                     st["last_alert_at"] = datetime.now().isoformat(timespec="seconds")
 
-            # --- Band alert: purchase_price ±5% (only for target_prices) ---
             if ticker in target_prices:
                 tp = target_prices.get(ticker, {}) or {}
                 purchase_price = safe_float(tp.get("purchase_price"))
@@ -1043,21 +1109,25 @@ def get_drop_and_band_alerts(config: Dict[str, Any]) -> Tuple[List[Dict[str, Any
                     band_high = round(purchase_price * 1.05, 2)
                     if price <= band_low:
                         if not st.get("band_below_sent", False):
-                            band_alerts.append({
-                                "ticker": ticker,
-                                "price": price,
-                                "purchase_price": purchase_price,
-                                "kind": "below",
-                            })
+                            band_alerts.append(
+                                {
+                                    "ticker": ticker,
+                                    "price": price,
+                                    "purchase_price": purchase_price,
+                                    "kind": "below",
+                                }
+                            )
                             st["band_below_sent"] = True
                     elif price >= band_high:
                         if not st.get("band_above_sent", False):
-                            band_alerts.append({
-                                "ticker": ticker,
-                                "price": price,
-                                "purchase_price": purchase_price,
-                                "kind": "above",
-                            })
+                            band_alerts.append(
+                                {
+                                    "ticker": ticker,
+                                    "price": price,
+                                    "purchase_price": purchase_price,
+                                    "kind": "above",
+                                }
+                            )
                             st["band_above_sent"] = True
                     else:
                         st["band_below_sent"] = False
@@ -1084,7 +1154,9 @@ def run_drop_detector() -> None:
 
     parts: List[str] = []
     if alerts_sent_this_run:
-        parts.append("The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year).")
+        parts.append(
+            "The following ticker(s) are significantly below their yearly average or 52-week high (plain English: price is low relative to the past year)."
+        )
         parts.append("<br>")
         parts.append("<br>")
         for i, a in enumerate(alerts_sent_this_run, 1):
@@ -1111,20 +1183,24 @@ def run_drop_detector() -> None:
             p = a.get("price")
             pp = a.get("purchase_price")
             if a.get("kind") == "below":
-                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+                parts.append(
+                    f"<b>{i}. {t}</b>: Price is 5% or more below your purchase price (current {p:.2f}, purchase {pp:.2f})."
+                )
             else:
-                parts.append(f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f}).")
+                parts.append(
+                    f"<b>{i}. {t}</b>: Price is 5% or more above your purchase price (current {p:.2f}, purchase {pp:.2f})."
+                )
             parts.append("<br>")
             parts.append("<br>")
     parts.append("<br>")
     parts.append("<br>")
     parts.append("<br>")
-    parts.append("<b>This is not investment advice; for informational purposes only.</b>")
+    parts.append(
+        "<b>This is not investment advice; for informational purposes only.</b>"
+    )
     body = "<html><body>" + "".join(parts) + "</body></html>"
     send_email(subject, body, body_subtype="html")
 
-
-# ---------- Scheduler ----------
 
 def run_scheduler() -> None:
     """Run scheduled jobs: Opportunity Hunter weekdays 12:15, Drop Detector weekdays 10–17 every hour."""
@@ -1135,14 +1211,16 @@ def run_scheduler() -> None:
     schedule.every().thursday.at("12:15").do(run_opportunity_hunter)
     schedule.every().friday.at("12:15").do(run_opportunity_hunter)
 
-    for hour in range(10, 18):  # 10:00 to 17:00
+    for hour in range(10, 18):
         schedule.every().monday.at(f"{hour:02d}:00").do(run_drop_detector)
         schedule.every().tuesday.at(f"{hour:02d}:00").do(run_drop_detector)
         schedule.every().wednesday.at(f"{hour:02d}:00").do(run_drop_detector)
         schedule.every().thursday.at(f"{hour:02d}:00").do(run_drop_detector)
         schedule.every().friday.at(f"{hour:02d}:00").do(run_drop_detector)
 
-    print("Scheduler started. Opportunity Hunter: weekdays 12:15. Drop Detector: weekdays 10:00–17:00 hourly.")
+    print(
+        "Scheduler started. Opportunity Hunter: weekdays 12:15. Drop Detector: weekdays 10:00–17:00 hourly."
+    )
     while True:
         try:
             schedule.run_pending()
@@ -1150,8 +1228,6 @@ def run_scheduler() -> None:
             print(f"Scheduler job error: {e}")
         time.sleep(60)
 
-
-# ---------- Legacy: track only & daily analysis (kept for compatibility) ----------
 
 def run_track_only(config: Dict[str, Any]) -> None:
     target_prices = config.get("target_prices", {})
@@ -1205,7 +1281,6 @@ def run_daily_analysis(config: Dict[str, Any], universe: str) -> None:
         print("Market data could not be fetched.")
         return
 
-    # Single debate for BUY opportunities on full universe; then filter owned for SELL
     approved_buy = run_debate_loop(snapshots, "BUY")
     owned = [s for s in snapshots if s.purchase_price is not None]
     approved_sell = run_debate_loop(owned, "SELL") if owned else []
@@ -1239,7 +1314,13 @@ def parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="track",
-        choices=["track", "daily_analysis", "scheduler", "opportunity_hunter", "drop_detector"],
+        choices=[
+            "track",
+            "daily_analysis",
+            "scheduler",
+            "opportunity_hunter",
+            "drop_detector",
+        ],
         help="track: update stock_states only. daily_analysis: one-shot debate + email. scheduler: run daemon. opportunity_hunter: one-shot. drop_detector: one-shot.",
     )
     p.add_argument(
