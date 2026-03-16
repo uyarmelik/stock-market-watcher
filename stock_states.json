@@ -1,8 +1,8 @@
 {
-  "updated_at": "2026-03-16T12:35:13",
+  "updated_at": "2026-03-16T13:51:22",
   "targets": {
     "ALTNY.IS": {
-      "price": 14.99,
+      "price": 14.97,
       "status": "BELOW_LOW",
       "purchase_price": 16.75,
       "low": 15.91,
@@ -16,14 +16,14 @@
       "high": 21.82
     },
     "TKFEN.IS": {
-      "price": 83.9,
+      "price": 84.35,
       "status": "IN_RANGE",
       "purchase_price": 85.7,
       "low": 81.41,
       "high": 89.99
     },
     "DAPGM.IS": {
-      "price": 13.8,
+      "price": 13.77,
       "status": "ABOVE_HIGH",
       "purchase_price": 13.1,
       "low": 12.44,
