@@ -1,9 +1,9 @@
 {
-  "updated_at": "2026-04-20T12:43:07",
+  "updated_at": "2026-04-20T13:55:08",
   "targets": {
     "PATEK.IS": {
-      "price": 21.84,
-      "status": "ABOVE_HIGH",
+      "price": 21.78,
+      "status": "IN_RANGE",
       "purchase_price": 20.78,
       "low": 19.74,
       "high": 21.82
