@@ -1,6 +1,13 @@
 {
-  "updated_at": "2026-05-01T07:57:51",
+  "updated_at": "2026-05-01T08:56:40",
   "targets": {
+    "PATEK.IS": {
+      "price": 21.68,
+      "status": "IN_RANGE",
+      "purchase_price": 20.78,
+      "low": 19.74,
+      "high": 21.82
+    },
     "SASA.IS": {
       "price": 3.14,
       "status": "ABOVE_HIGH",
